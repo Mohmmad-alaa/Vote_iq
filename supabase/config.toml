@@ -1,0 +1,7 @@
+project_id = "exvlodxhfeavyvjgucky"
+
+[functions.create-agent]
+verify_jwt = false
+
+[functions.add-agent-permission]
+verify_jwt = false
