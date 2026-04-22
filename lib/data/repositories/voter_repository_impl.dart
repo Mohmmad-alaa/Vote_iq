@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:hive_flutter/hive_flutter.dart';
 
@@ -37,6 +38,8 @@ class VoterRepositoryImpl implements VoterRepository {
   String? _loadedForUserId;
   static const Duration _syncInterval = Duration(minutes: 5);
   Future<void>? _cachePrimingFuture;
+  Timer? _backgroundSyncTimer;
+  bool _isBackgroundSyncRunning = false;
   late final Stream<Voter> _sharedVoterChanges = _remoteDatasource.voterChanges
       .asyncMap((model) async {
         final cached = await _localDatasource.getCachedVoter(model.voterSymbol);
@@ -45,6 +48,12 @@ class VoterRepositoryImpl implements VoterRepository {
         return mergedModel.toEntity();
       })
       .asBroadcastStream();
+
+  final StreamController<void> _fullSyncCompleteController = StreamController<void>.broadcast();
+
+  @override
+  Stream<void> get onFullSyncComplete => _fullSyncCompleteController.stream;
+
 
   VoterRepositoryImpl({
     required SupabaseVoterDatasource remoteDatasource,
@@ -89,16 +98,40 @@ class VoterRepositoryImpl implements VoterRepository {
   }
 
   void _initBackgroundSync() {
-    Future.doWhile(() async {
-      await Future.delayed(_syncInterval);
-      if (await _connectivity.hasInternet) {
-        await _syncIncrementalChanges();
+    _backgroundSyncTimer?.cancel();
+    // Add random jitter (0-60s) to prevent all agents from syncing at the exact same moment
+    final jitter = Duration(seconds: Random().nextInt(60));
+    _backgroundSyncTimer = Timer.periodic(_syncInterval + jitter, (_) async {
+      if (_isBackgroundSyncRunning) return;
+      _isBackgroundSyncRunning = true;
+      try {
+        if (await _connectivity.hasInternet) {
+          await _syncIncrementalChanges();
+        }
+      } finally {
+        _isBackgroundSyncRunning = false;
       }
-      return true;
     });
   }
 
+  void _logDuration(String label, Stopwatch stopwatch, {String? extra}) {
+    final suffix = extra == null || extra.isEmpty ? '' : ', $extra';
+    debugPrint(
+      'Repository: $label completed in ${stopwatch.elapsedMilliseconds}ms$suffix',
+    );
+  }
+
+  bool _hasExplicitViewFilters(VoterFilter filter) {
+    return (filter.familyIds != null && filter.familyIds!.isNotEmpty) ||
+        filter.subClanId != null ||
+        filter.centerId != null ||
+        filter.status != null ||
+        filter.includeManageableUnassigned ||
+        (filter.searchQuery?.isNotEmpty ?? false);
+  }
+
   Future<void> _syncIncrementalChanges() async {
+    final stopwatch = Stopwatch()..start();
     if (_lastSyncTime == null || !_isDataLoaded) return;
     try {
       final updatedVoters = await _remoteDatasource.getVotersUpdatedAfter(
@@ -108,28 +141,81 @@ class VoterRepositoryImpl implements VoterRepository {
         await _localDatasource.cacheVoters(updatedVoters);
         await _setLastSyncTime(DateTime.now());
       }
+      _logDuration(
+        'syncIncrementalChanges',
+        stopwatch,
+        extra: 'updated=${updatedVoters.length}',
+      );
     } catch (e) {
       debugPrint('Repository: Sync error: $e');
     }
   }
 
-  Future<void> _resetScopedCacheForCurrentUser() async {
-    debugPrint('Repository: Resetting scoped voter cache for user switch');
+  Future<void> _resetScopedCacheForCurrentUser([String? scopeUserId]) async {
+    debugPrint(
+      'Repository: Resetting scoped voter cache for '
+      'user=${scopeUserId ?? _loadedForUserId}',
+    );
     await _localDatasource.clearCache();
+    try {
+      final box = await Hive.openBox(AppConstants.hiveSettingsBox);
+      final targetUserId = scopeUserId ?? _loadedForUserId;
+      if (targetUserId != null) {
+        await box.delete('last_sync_time_$targetUserId');
+        await box.delete('cached_voter_scope_key_$targetUserId');
+      }
+    } catch (_) {}
     _lastSyncTime = null;
     _isDataLoaded = false;
     _isFirstLoad = true;
+  }
+
+  @override
+  Future<void> clearCache() async {
+    debugPrint('Repository: Explicit clearCache called (e.g. from logout)');
+    await _resetScopedCacheForCurrentUser();
+    try {
+      final box = await Hive.openBox(AppConstants.hiveSettingsBox);
+      await box.delete('cached_db_owner_id');
+    } catch (_) {}
+  }
+
+  @override
+  Future<Either<Failure, void>> resetAllVoters() async {
+    try {
+      await _ensureCurrentUserScope();
+      if (await _connectivity.hasInternet) {
+        await _remoteDatasource.resetAllVoters();
+        await _localDatasource.clearCache();
+        _isDataLoaded = false;
+        _lastSyncTime = null;
+        return const Right(null);
+      }
+      return const Left(ServerFailure(message: 'يجب توفر اتصال بالإنترنت لتصفير المصوتين'));
+    } catch (e) {
+      return Left(ServerFailure(message: 'خطأ: $e'));
+    }
   }
 
   Future<void> _ensureCurrentUserScope() async {
     final currentUserId = _authDatasource.currentUserId;
     if (currentUserId == null) {
       if (_loadedForUserId != null) {
-        await _resetScopedCacheForCurrentUser();
+        await _resetScopedCacheForCurrentUser(_loadedForUserId);
         _loadedForUserId = null;
       }
       return;
     }
+
+    // Ensure cross-session isolation (Cold boot protection)
+    final settingsBox = await Hive.openBox(AppConstants.hiveSettingsBox);
+    final cachedOwnerId = settingsBox.get('cached_db_owner_id') as String?;
+
+    if (cachedOwnerId != null && cachedOwnerId != currentUserId) {
+      debugPrint('Repository: DB owner changed from $cachedOwnerId to $currentUserId! Wiping offline cache.');
+      await _resetScopedCacheForCurrentUser(currentUserId);
+    }
+    await settingsBox.put('cached_db_owner_id', currentUserId);
 
     if (_loadedForUserId != currentUserId) {
       debugPrint(
@@ -138,20 +224,49 @@ class VoterRepositoryImpl implements VoterRepository {
       // Only clear cache if we actually switched from a previous logged-in user to a DIFFERENT user
       // If _loadedForUserId is null, it's a cold boot, so keep the offline cache!
       if (_loadedForUserId != null) {
-        await _resetScopedCacheForCurrentUser();
+        await _resetScopedCacheForCurrentUser(currentUserId);
       }
       _loadedForUserId = currentUserId;
+    } else {
+      debugPrint('Repository: User scope unchanged for $currentUserId');
+    }
+
+    if (await _connectivity.hasInternet) {
+      final scopeStorageKey = 'cached_voter_scope_key_$currentUserId';
+      try {
+        final remoteScopeKey =
+            await _remoteDatasource.getPermissionScopeCacheKey();
+        final cachedScopeKey = settingsBox.get(scopeStorageKey) as String?;
+        final isRestrictedScope = remoteScopeKey.startsWith('restricted:');
+
+        if ((cachedScopeKey == null && isRestrictedScope) ||
+            (cachedScopeKey != null && cachedScopeKey != remoteScopeKey)) {
+          debugPrint(
+            'Repository: permission scope changed from $cachedScopeKey '
+            'to $remoteScopeKey. Wiping local voter cache.',
+          );
+          await _resetScopedCacheForCurrentUser(currentUserId);
+        }
+
+        await settingsBox.put(scopeStorageKey, remoteScopeKey);
+      } catch (e) {
+        debugPrint(
+          'Repository: failed to evaluate permission scope cache key: $e',
+        );
+      }
+    }
+
+    if (_lastSyncTime == null) {
       _lastSyncTime = await _getLastSyncTime();
       if (_lastSyncTime != null) {
         _isDataLoaded = true;
         _isFirstLoad = false;
       }
-    } else {
-      debugPrint('Repository: User scope unchanged for $currentUserId');
     }
   }
 
   Future<List<VoterModel>> _loadAllDataFromServer() async {
+    final stopwatch = Stopwatch()..start();
     final allVoters = await _remoteDatasource.getAllVoters();
     debugPrint(
       'Repository: _loadAllDataFromServer fetched ${allVoters.length} voters',
@@ -161,6 +276,11 @@ class VoterRepositoryImpl implements VoterRepository {
     await _setLastSyncTime(DateTime.now());
     _isDataLoaded = true;
     _isFirstLoad = false;
+    _logDuration(
+      'loadAllDataFromServer',
+      stopwatch,
+      extra: 'count=${allVoters.length}',
+    );
     return allVoters;
   }
 
@@ -181,11 +301,7 @@ class VoterRepositoryImpl implements VoterRepository {
       'isDataLoaded=$_isDataLoaded',
     );
 
-    if (localCount > 0) {
-      if (!_isDataLoaded) {
-        _isDataLoaded = true;
-        _isFirstLoad = false;
-      }
+    if (_isDataLoaded && localCount > 0) {
       return;
     }
 
@@ -211,11 +327,12 @@ class VoterRepositoryImpl implements VoterRepository {
     VoterFilter filter, {
     bool forceRefresh = false,
   }) async {
+    final stopwatch = Stopwatch()..start();
     try {
       await _ensureCurrentUserScope();
-      // Check local data first
       final localCount = await _localDatasource.getVotersCount();
       final hasInternet = await _connectivity.hasInternet;
+      final hasExplicitFilters = _hasExplicitViewFilters(filter);
       debugPrint(
         'Repository: getVoters start '
         'localCount=$localCount, hasInternet=$hasInternet, '
@@ -223,7 +340,7 @@ class VoterRepositoryImpl implements VoterRepository {
         'loadedForUser=$_loadedForUserId',
       );
 
-      List<VoterModel>? freshlyLoadedFromServer;
+      List<VoterModel>? remotePageResult;
 
       if (hasInternet) {
         if (_cachePrimingFuture != null) {
@@ -232,39 +349,35 @@ class VoterRepositoryImpl implements VoterRepository {
           );
           await _cachePrimingFuture;
         }
-        // Online mode: if completely empty cache, fetch one page to unblock UI then background sync full DB
-        if (localCount == 0 && forceRefresh == false) {
-          debugPrint('Repository: Cache empty, fetching first page instantly to unblock UI');
-          freshlyLoadedFromServer = await _remoteDatasource.getVoters(
-            VoterFilter(
-              familyIds: filter.familyIds,
-              subClanId: filter.subClanId,
-              centerId: filter.centerId,
-              status: filter.status,
-              searchQuery: filter.searchQuery,
-              page: 0,
-              pageSize: 50,
-            ),
-          );
-          await _localDatasource.cacheVoters(freshlyLoadedFromServer);
+        if (forceRefresh) {
+          remotePageResult = await _loadAllDataFromServer();
+        } else if (!_isDataLoaded || localCount == 0 || hasExplicitFilters) {
+          remotePageResult = await _remoteDatasource.getVoters(filter);
+          if (remotePageResult.isNotEmpty) {
+            await _localDatasource.cacheVoters(remotePageResult);
+          }
 
-          // Trigger full background sync without awaiting
-          _cachePrimingFuture = _loadAllDataFromServer().then((_) {
-            debugPrint('Repository: Background cache priming complete');
-          }).catchError((e) {
-            debugPrint('Repository: Background cache priming failed: $e');
-          });
-        }
-        else if (!_isDataLoaded || localCount == 0 || forceRefresh) {
-          // Forced refresh - load all from server
-          freshlyLoadedFromServer = await _loadAllDataFromServer();
+          if (filter.page == 0 &&
+              !hasExplicitFilters &&
+              filter.pageSize > 0 &&
+              remotePageResult.length < filter.pageSize) {
+            _isDataLoaded = true;
+            _isFirstLoad = false;
+            await _setLastSyncTime(DateTime.now());
+          }
+
+          _logDuration(
+            'getVoters remote-page',
+            stopwatch,
+            extra:
+                'page=${filter.page}, pageSize=${filter.pageSize}, count=${remotePageResult.length}',
+          );
+          return Right(remotePageResult.map((m) => m.toEntity()).toList());
         } else if (_lastSyncTime != null && !_isFirstLoad) {
-          // Sync incremental changes only
           await _syncIncrementalChanges();
         }
       }
 
-      // Always use local data (whether online or offline)
       final models = await _localDatasource.getCachedVoters(
         familyIds: filter.familyIds,
         subClanId: filter.subClanId,
@@ -289,14 +402,19 @@ class VoterRepositoryImpl implements VoterRepository {
           (filter.searchQuery == null || filter.searchQuery!.isEmpty);
 
       if (models.isEmpty &&
-          freshlyLoadedFromServer != null &&
-          freshlyLoadedFromServer.isNotEmpty &&
+          remotePageResult != null &&
+          remotePageResult.isNotEmpty &&
           noExplicitFilters) {
         debugPrint(
           'Repository: local cache empty after fresh server load, '
           'returning freshly loaded server data directly',
         );
-        return Right(freshlyLoadedFromServer.map((m) => m.toEntity()).toList());
+        _logDuration(
+          'getVoters fallback-remote-page',
+          stopwatch,
+          extra: 'count=${remotePageResult.length}',
+        );
+        return Right(remotePageResult.map((m) => m.toEntity()).toList());
       }
 
       if (models.isEmpty && hasInternet && !forceRefresh && noExplicitFilters) {
@@ -323,14 +441,24 @@ class VoterRepositoryImpl implements VoterRepository {
             'Repository: forced reload cache still empty, '
             'returning server data directly',
           );
+          _logDuration(
+            'getVoters forced-reload-remote',
+            stopwatch,
+            extra: 'count=${reloadedFromServer.length}',
+          );
           return Right(reloadedFromServer.map((m) => m.toEntity()).toList());
         }
+        _logDuration(
+          'getVoters forced-reload-local',
+          stopwatch,
+          extra: 'count=${reloadedModels.length}',
+        );
         return Right(reloadedModels.map((m) => m.toEntity()).toList());
       }
+      _logDuration('getVoters local', stopwatch, extra: 'count=${models.length}');
       return Right(models.map((m) => m.toEntity()).toList());
     } catch (e) {
       debugPrint('Repository: getVoters exception: $e');
-      // Try cache fallback
       try {
         final models = await _localDatasource.getCachedVoters(
           familyIds: filter.familyIds,
@@ -344,10 +472,52 @@ class VoterRepositoryImpl implements VoterRepository {
         debugPrint(
           'Repository: getVoters fallback local result count=${models.length}',
         );
+        _logDuration(
+          'getVoters local-exception-fallback',
+          stopwatch,
+          extra: 'count=${models.length}',
+        );
         return Right(models.map((m) => m.toEntity()).toList());
       } catch (_) {
         return Left(ServerFailure(message: 'خطأ غير متوقع: $e'));
       }
+    }
+  }
+
+  @override
+  Future<Either<Failure, int>> countVoters(VoterFilter filter) async {
+    try {
+      await _ensureCurrentUserScope();
+      if (await _connectivity.hasInternet) {
+        final count = await _remoteDatasource.getVotersCount(filter);
+        return Right(count);
+      }
+
+      final count = await _localDatasource.getCachedVotersCount(
+        familyIds: filter.familyIds,
+        subClanId: filter.subClanId,
+        centerId: filter.centerId,
+        status: filter.status,
+        searchQuery: filter.searchQuery,
+      );
+      return Right(count);
+    } on ServerException catch (e) {
+      try {
+        final count = await _localDatasource.getCachedVotersCount(
+          familyIds: filter.familyIds,
+          subClanId: filter.subClanId,
+          centerId: filter.centerId,
+          status: filter.status,
+          searchQuery: filter.searchQuery,
+        );
+        return Right(count);
+      } catch (_) {
+        return Left(ServerFailure(message: e.message));
+      }
+    } on CacheException catch (e) {
+      return Left(CacheFailure(message: e.message));
+    } catch (e) {
+      return Left(ServerFailure(message: 'خطأ في عد الناخبين: $e'));
     }
   }
 
@@ -565,6 +735,33 @@ class VoterRepositoryImpl implements VoterRepository {
     int? centerId,
   }) async {
     try {
+      await _ensureCurrentUserScope();
+      final isOverallStatsRequest =
+          familyId == null && subClanId == null && centerId == null;
+
+      if (isOverallStatsRequest) {
+        try {
+          final remoteStats = await _remoteDatasource.getVoterStats(
+            familyId: familyId,
+            subClanId: subClanId,
+            centerId: centerId,
+          );
+          return Right(remoteStats);
+        } on ServerException {
+          // Fall back to the local cache below if the remote request fails.
+        }
+      } else {
+        final hasInternet = await _connectivity.hasInternet;
+        if (hasInternet && !_isDataLoaded) {
+          final remoteStats = await _remoteDatasource.getVoterStats(
+            familyId: familyId,
+            subClanId: subClanId,
+            centerId: centerId,
+          );
+          return Right(remoteStats);
+        }
+      }
+
       await _ensureStatsCacheReady();
       // Use local cache for ALL statistics since it's fully synced.
       // Doing this prevents 100+ parallel requests to Supabase which causes "list map" failure or socket timeout.
@@ -866,18 +1063,17 @@ class VoterRepositoryImpl implements VoterRepository {
       return Right(votersToInsert.length);
     } on ServerException catch (e) {
       print(
-        'DEBUG: VoterRepository: ServerException during import: ' + e.message,
+        'DEBUG: VoterRepository: ServerException during import: ${e.message}',
       );
       return Left(ServerFailure(message: e.message));
     } catch (e, stack) {
       print(
-        'DEBUG: VoterRepository: Unexpected Exception during import: ' +
-            e.toString(),
+        'DEBUG: VoterRepository: Unexpected Exception during import: $e',
       );
-      print('DEBUG: VoterRepository: StackTrace: ' + stack.toString());
+      print('DEBUG: VoterRepository: StackTrace: $stack');
       return Left(
         ServerFailure(
-          message: 'خطأ غير متوقع أثناء الاستيراد: ' + e.toString(),
+          message: 'خطأ غير متوقع أثناء الاستيراد: $e',
         ),
       );
     }
@@ -993,4 +1189,3 @@ class VoterRepositoryImpl implements VoterRepository {
     }
   }
 }
-

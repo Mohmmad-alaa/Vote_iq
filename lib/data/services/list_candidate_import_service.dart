@@ -76,7 +76,7 @@ class ListCandidateImportService {
 
             if (candidateName != null && candidateName.isNotEmpty && orderStr != null && orderStr.isNotEmpty) {
                // Only prepend if the user hasn't already hardcoded it.
-               if (!candidateName.startsWith('$orderStr') && !candidateName.startsWith('$orderStr-')) {
+               if (!candidateName.startsWith(orderStr) && !candidateName.startsWith('$orderStr-')) {
                  // Format: 1- Candidate Name
                  // Clean up float representation from Excel like "1.0"
                  String cleanedOrder = orderStr;

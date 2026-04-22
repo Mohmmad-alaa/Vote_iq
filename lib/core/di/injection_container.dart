@@ -88,7 +88,14 @@ Future<void> initDependencies() async {
 
   // ── Repositories ──
   sl.registerLazySingleton<AuthRepository>(
-    () => AuthRepositoryImpl(sl<SupabaseAuthDatasource>()),
+    () => AuthRepositoryImpl(
+      remoteDatasource: sl<SupabaseAuthDatasource>(),
+      lookupRepository: sl<LookupRepository>(),
+      syncQueue: sl<SyncQueue>(),
+      voterDatasource: sl<SupabaseVoterDatasource>(),
+      lookupDatasource: sl<SupabaseLookupDatasource>(),
+      agentDatasource: sl<SupabaseAgentDatasource>(),
+    ),
   );
   sl.registerLazySingleton<AgentRepository>(
     () => AgentRepositoryImpl(
@@ -119,7 +126,7 @@ Future<void> initDependencies() async {
 
   // ── Use Cases ──
   sl.registerLazySingleton(() => LoginUseCase(sl<AuthRepository>()));
-  sl.registerLazySingleton(() => LogoutUseCase(sl<AuthRepository>()));
+  sl.registerLazySingleton(() => LogoutUseCase(sl<AuthRepository>(), sl<VoterRepository>()));
   sl.registerLazySingleton(() => GetVotersUseCase(sl<VoterRepository>()));
   sl.registerLazySingleton(() => SearchVotersUseCase(sl<VoterRepository>()));
   sl.registerLazySingleton(
@@ -150,6 +157,7 @@ Future<void> initDependencies() async {
   sl.registerLazySingleton(() => GetAgentsUseCase(sl<AgentRepository>()));
   sl.registerLazySingleton(() => CreateAgentUseCase(sl<AgentRepository>()));
   sl.registerLazySingleton(() => UpdateAgentStatusUseCase(sl<AgentRepository>()));
+  sl.registerLazySingleton(() => DeleteAgentUseCase(sl<AgentRepository>()));
   sl.registerLazySingleton(() => GetAgentPermissionsUseCase(sl<AgentRepository>()));
   sl.registerLazySingleton(() => AddAgentPermissionUseCase(sl<AgentRepository>()));
   sl.registerLazySingleton(() => RemoveAgentPermissionUseCase(sl<AgentRepository>()));
@@ -192,6 +200,7 @@ Future<void> initDependencies() async {
       getAgents: sl<GetAgentsUseCase>(),
       createAgent: sl<CreateAgentUseCase>(),
       updateAgentStatus: sl<UpdateAgentStatusUseCase>(),
+      deleteAgent: sl<DeleteAgentUseCase>(),
       getPermissions: sl<GetAgentPermissionsUseCase>(),
       addPermission: sl<AddAgentPermissionUseCase>(),
       removePermission: sl<RemoveAgentPermissionUseCase>(),

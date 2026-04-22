@@ -12,6 +12,7 @@ class AgentPermission extends Equatable {
   final String agentId;
   final int? familyId;
   final int? subClanId;
+  final bool isManager;
 
   // Resolved names
   final String? familyName;
@@ -22,6 +23,7 @@ class AgentPermission extends Equatable {
     required this.agentId,
     this.familyId,
     this.subClanId,
+    this.isManager = false,
     this.familyName,
     this.subClanName,
   });
@@ -36,5 +38,5 @@ class AgentPermission extends Equatable {
   bool get isSubClanLevel => familyId != null && subClanId != null;
 
   @override
-  List<Object?> get props => [id, agentId, familyId, subClanId];
+  List<Object?> get props => [id, agentId, familyId, subClanId, isManager];
 }

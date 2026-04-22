@@ -74,15 +74,16 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final isAdmin = widget.agent.isAdmin;
+    final hasAgentManagementAccess = isAdmin || widget.agent.canCreateAgents;
     final isDesktop = ResponsiveHelper.isDesktop(context);
 
     if (isDesktop) {
-      return _buildDesktopLayout(isAdmin);
+      return _buildDesktopLayout(isAdmin, hasAgentManagementAccess);
     }
-    return _buildMobileLayout(isAdmin);
+    return _buildMobileLayout(isAdmin, hasAgentManagementAccess);
   }
 
-  Widget _buildDesktopLayout(bool isAdmin) {
+  Widget _buildDesktopLayout(bool isAdmin, bool hasAgentManagementAccess) {
     return Scaffold(
       body: Row(
         children: [
@@ -125,7 +126,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 fontSize: 11,
               ),
               indicatorColor: AppColors.primarySurface,
-              destinations: isAdmin
+              destinations: hasAgentManagementAccess
                   ? const [
                       NavigationRailDestination(
                         icon: Icon(Icons.dashboard_outlined),
@@ -161,8 +162,8 @@ class _HomeScreenState extends State<HomeScreen> {
           Expanded(
             child: Column(
               children: [
-                _buildAppBar(isAdmin),
-                Expanded(child: _buildBody(isAdmin)),
+                _buildAppBar(isAdmin, hasAgentManagementAccess),
+                Expanded(child: _buildBody(isAdmin, hasAgentManagementAccess)),
               ],
             ),
           ),
@@ -172,7 +173,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildMobileLayout(bool isAdmin) {
+  Widget _buildMobileLayout(bool isAdmin, bool hasAgentManagementAccess) {
     return Scaffold(
       appBar: AppBar(
         flexibleSpace: Container(
@@ -186,18 +187,18 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             const Icon(Icons.how_to_vote_rounded, color: Colors.white70, size: 20),
             const SizedBox(width: 8),
-            Text(_getTitle(isAdmin)),
+            Text(_getTitle(isAdmin, hasAgentManagementAccess)),
           ],
         ),
         actions: _buildActions(isAdmin),
       ),
-      body: _buildBody(isAdmin),
-      bottomNavigationBar: _buildBottomNav(isAdmin),
+      body: _buildBody(isAdmin, hasAgentManagementAccess),
+      bottomNavigationBar: _buildBottomNav(hasAgentManagementAccess),
       floatingActionButton: _buildFAB(isAdmin),
     );
   }
 
-  Widget _buildAppBar(bool isAdmin) {
+  Widget _buildAppBar(bool isAdmin, bool hasAgentManagementAccess) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
       decoration: const BoxDecoration(
@@ -215,7 +216,7 @@ class _HomeScreenState extends State<HomeScreen> {
           const Icon(Icons.how_to_vote_rounded, color: Colors.white70, size: 22),
           const SizedBox(width: 10),
           Text(
-            _getTitle(isAdmin),
+            _getTitle(isAdmin, hasAgentManagementAccess),
             style: const TextStyle(
               fontSize: 20,
               fontWeight: FontWeight.w700,
@@ -240,12 +241,21 @@ class _HomeScreenState extends State<HomeScreen> {
           return const SizedBox.shrink();
         },
       ),
-      if (isAdmin)
-        IconButton(
-          icon: const Icon(Icons.settings_suggest_rounded, color: Colors.white),
-          tooltip: 'أدوات الإدارة',
-          onPressed: () => _showManagementMenu(context),
-        ),
+      FutureBuilder<bool>(
+        initialData: sl<SupabaseVoterDatasource>().isAnyManager,
+        future: sl<SupabaseVoterDatasource>().checkIsAnyManager(),
+        builder: (context, snapshot) {
+          final isManager = isAdmin || (snapshot.data == true);
+          if (isManager) {
+            return IconButton(
+              icon: const Icon(Icons.settings_suggest_rounded, color: Colors.white),
+              tooltip: 'أدوات الإدارة',
+              onPressed: () => _showManagementMenu(context, isAdmin),
+            );
+          }
+          return const SizedBox.shrink();
+        },
+      ),
       IconButton(
         icon: const Icon(Icons.logout, color: Colors.redAccent),
         tooltip: 'تسجيل الخروج',
@@ -276,7 +286,9 @@ class _HomeScreenState extends State<HomeScreen> {
     return null;
   }
 
-  void _showManagementMenu(BuildContext context) {
+  void _showManagementMenu(BuildContext context, bool isGlobalAdmin) {
+    final isPrimaryAdmin = isGlobalAdmin && widget.agent.username == 'admin';
+
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -287,7 +299,8 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
+            if (isGlobalAdmin)
+              ListTile(
               leading: const Icon(Icons.category_rounded, color: Colors.blue),
               title: const Text(
                 'إدارة البيانات المرجعية (العائلات، المراكز...)',
@@ -302,7 +315,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 );
               },
             ),
-            ListTile(
+            if (isGlobalAdmin)
+              ListTile(
               leading: const Icon(
                 Icons.file_upload_rounded,
                 color: Colors.green,
@@ -321,7 +335,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 );
               },
             ),
-            ListTile(
+            if (isGlobalAdmin)
+              ListTile(
               leading: const Icon(
                 Icons.person_add_rounded,
                 color: Colors.orange,
@@ -359,14 +374,53 @@ class _HomeScreenState extends State<HomeScreen> {
                 );
               },
             ),
+            if (isPrimaryAdmin)
+              ListTile(
+              leading: const Icon(
+                Icons.restore_rounded,
+                color: Colors.red,
+              ),
+              title: const Text('تصفير جميع المصوتين', style: TextStyle(color: Colors.red)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showResetVotersDialog(context);
+              },
+            ),
           ],
         ),
       ),
     );
   }
 
-  String _getTitle(bool isAdmin) {
-    if (isAdmin) {
+  void _showResetVotersDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('تصفير جميع المصوتين', style: TextStyle(color: Colors.red)),
+        content: const Text('هل أنت متأكد من رغبتك في تصفير جميع المصوتين؟ سيتم إعادة جميع الناخبين إلى حالة "لم يصوت" وحذف أي مرشحين أو قوائم تم اختيارها.\n\nهذا الإجراء لا يمكن التراجع عنه.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('إلغاء'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              context.read<VotersCubit>().resetAllVoters();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('تم البدء بعملية تصفير المصوتين...')),
+              );
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.error),
+            child: const Text('نعم، متأكد'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _getTitle(bool isAdmin, bool hasAgentManagementAccess) {
+    if (hasAgentManagementAccess) {
       switch (_currentIndex) {
         case 0:
           return 'لوحة المتابعة';
@@ -389,8 +443,8 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Widget _buildBody(bool isAdmin) {
-    if (isAdmin) {
+  Widget _buildBody(bool isAdmin, bool hasAgentManagementAccess) {
+    if (hasAgentManagementAccess) {
       switch (_currentIndex) {
         case 0:
           return const DashboardScreen();
@@ -457,8 +511,8 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildBottomNav(bool isAdmin) {
-    if (isAdmin) {
+  Widget _buildBottomNav(bool hasAgentManagementAccess) {
+    if (hasAgentManagementAccess) {
       return Container(
         decoration: BoxDecoration(
           color: AppColors.cardBg,
@@ -558,8 +612,8 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_currentIndex == index) return;
     setState(() => _currentIndex = index);
 
-    final isAdmin = widget.agent.isAdmin;
-    final dashboardTabIndex = isAdmin ? 0 : 1;
+    final hasAgentManagementAccess = widget.agent.isAdmin || widget.agent.canCreateAgents;
+    final dashboardTabIndex = hasAgentManagementAccess ? 0 : 1;
 
     // Refresh the target tab's data to reflect any changes
     if (index == dashboardTabIndex) {
@@ -613,9 +667,9 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     _lastAutoRefreshAt = now;
 
-    final isAdmin = widget.agent.isAdmin;
-    final votersTabIndex = isAdmin ? 1 : 0;
-    final dashboardTabIndex = isAdmin ? 0 : 1;
+    final hasAgentManagementAccess = widget.agent.isAdmin || widget.agent.canCreateAgents;
+    final votersTabIndex = hasAgentManagementAccess ? 1 : 0;
+    final dashboardTabIndex = hasAgentManagementAccess ? 0 : 1;
 
     if (_currentIndex == votersTabIndex) {
       if (forceRefresh || restartRealtime) {

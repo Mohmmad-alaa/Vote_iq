@@ -7,6 +7,7 @@ class Agent extends Equatable {
   final String username;
   final String role; // 'admin' | 'agent'
   final bool isActive;
+  final bool canCreateAgents;
   final DateTime? createdAt;
 
   const Agent({
@@ -15,6 +16,7 @@ class Agent extends Equatable {
     required this.username,
     this.role = 'agent',
     this.isActive = true,
+    this.canCreateAgents = false,
     this.createdAt,
   });
 
@@ -26,6 +28,7 @@ class Agent extends Equatable {
     String? username,
     String? role,
     bool? isActive,
+    bool? canCreateAgents,
     DateTime? createdAt,
   }) {
     return Agent(
@@ -34,10 +37,11 @@ class Agent extends Equatable {
       username: username ?? this.username,
       role: role ?? this.role,
       isActive: isActive ?? this.isActive,
+      canCreateAgents: canCreateAgents ?? this.canCreateAgents,
       createdAt: createdAt ?? this.createdAt,
     );
   }
 
   @override
-  List<Object?> get props => [id, fullName, username, role, isActive, createdAt];
+  List<Object?> get props => [id, fullName, username, role, isActive, canCreateAgents, createdAt];
 }

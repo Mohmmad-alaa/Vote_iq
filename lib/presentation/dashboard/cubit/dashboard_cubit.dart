@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../../domain/entities/candidate.dart';
+import '../../../domain/entities/electoral_list.dart';
 import '../../../domain/entities/family.dart';
 import '../../../domain/entities/sub_clan.dart';
 import '../../../domain/entities/voter.dart';
@@ -31,6 +33,7 @@ class DashboardCubit extends Cubit<DashboardState> {
   }
 
   Future<void> loadStats() async {
+    final stopwatch = Stopwatch()..start();
     debugPrint('[DashboardCubit] loadStats start');
     emit(const DashboardLoading());
 
@@ -45,7 +48,8 @@ class DashboardCubit extends Cubit<DashboardState> {
         debugPrint(
           '[DashboardCubit] loadStats success: '
           'total=${overallStats.total}, voted=${overallStats.voted}, '
-          'refused=${overallStats.refused}, notVoted=${overallStats.notVoted}',
+          'refused=${overallStats.refused}, notVoted=${overallStats.notVoted}, '
+          'durationMs=${stopwatch.elapsedMilliseconds}',
         );
         emit(DashboardLoaded(overallStats: overallStats));
       },
@@ -94,6 +98,62 @@ class DashboardCubit extends Cubit<DashboardState> {
     });
   }
 
+  int _extractCandidateOrder(String name) {
+    final match = RegExp(r'\d+').firstMatch(name);
+    return match != null ? int.parse(match.group(0)!) : 999999;
+  }
+
+  List<ListStatItem> _buildListStats(
+    List<ElectoralList> electoralLists,
+    List<Candidate> allCandidates,
+    Map<int, int> listVotes,
+    Map<int, int> candidateVotes,
+  ) {
+    final candidatesByListId = <int, List<Candidate>>{};
+    for (final candidate in allCandidates) {
+      final listId = candidate.listId;
+      if (listId == null) continue;
+      (candidatesByListId[listId] ??= <Candidate>[]).add(candidate);
+    }
+
+    final listStats = <ListStatItem>[];
+    for (final list in electoralLists) {
+      final listCandidates = candidatesByListId[list.id] ?? const <Candidate>[];
+      final candidateStatItems = <CandidateStatItem>[];
+
+      for (final candidate in listCandidates) {
+        final votes = candidateVotes[candidate.id] ?? 0;
+        if (votes <= 0) continue;
+        candidateStatItems.add(
+          CandidateStatItem(
+            candidateName: candidate.candidateName,
+            votes: votes,
+          ),
+        );
+      }
+
+      candidateStatItems.sort((a, b) {
+        final numA = _extractCandidateOrder(a.candidateName);
+        final numB = _extractCandidateOrder(b.candidateName);
+        if (numA != numB) {
+          return numA.compareTo(numB);
+        }
+        return b.votes.compareTo(a.votes);
+      });
+
+      listStats.add(
+        ListStatItem(
+          listName: list.listName,
+          totalVotes: listVotes[list.id] ?? 0,
+          candidates: candidateStatItems,
+        ),
+      );
+    }
+
+    listStats.sort((a, b) => b.totalVotes.compareTo(a.totalVotes));
+    return listStats;
+  }
+
   Future<void> loadFamilyStats() async {
     final currentState = state;
     if (currentState is! DashboardLoaded ||
@@ -102,6 +162,7 @@ class DashboardCubit extends Cubit<DashboardState> {
       return;
     }
 
+    final stopwatch = Stopwatch()..start();
     debugPrint('[DashboardCubit] loadFamilyStats start');
     emit(currentState.copyWith(isLoadingFamilyStats: true));
 
@@ -121,7 +182,8 @@ class DashboardCubit extends Cubit<DashboardState> {
         final statsByFamily = await _buildFamilyStats(families);
         debugPrint(
           '[DashboardCubit] loadFamilyStats success: '
-          'families=${families.length}, stats=${statsByFamily.length}',
+          'families=${families.length}, stats=${statsByFamily.length}, '
+          'durationMs=${stopwatch.elapsedMilliseconds}',
         );
         emit(
           currentState.copyWith(
@@ -142,6 +204,7 @@ class DashboardCubit extends Cubit<DashboardState> {
       return;
     }
 
+    final stopwatch = Stopwatch()..start();
     debugPrint('[DashboardCubit] loadSubClanStats start');
     emit(currentState.copyWith(isLoadingSubClanStats: true));
 
@@ -161,7 +224,8 @@ class DashboardCubit extends Cubit<DashboardState> {
         final statsBySubClan = await _buildSubClanStats(subClans);
         debugPrint(
           '[DashboardCubit] loadSubClanStats success: '
-          'subClans=${subClans.length}, stats=${statsBySubClan.length}',
+          'subClans=${subClans.length}, stats=${statsBySubClan.length}, '
+          'durationMs=${stopwatch.elapsedMilliseconds}',
         );
         emit(
           currentState.copyWith(
@@ -182,6 +246,7 @@ class DashboardCubit extends Cubit<DashboardState> {
       return;
     }
 
+    final stopwatch = Stopwatch()..start();
     debugPrint('[DashboardCubit] loadListStats start');
     emit(currentState.copyWith(isLoadingListStats: true));
 
@@ -213,56 +278,16 @@ class DashboardCubit extends Cubit<DashboardState> {
 
     final listVotes = votesMap['listVotes'] ?? {};
     final candidateVotes = votesMap['candidateVotes'] ?? {};
-
-    final listStats = <ListStatItem>[];
-
-    for (final list in electoralLists) {
-      final listCandidates = allCandidates
-          .where((c) => c.listId == list.id)
-          .toList();
-
-      final candidateStatItems = <CandidateStatItem>[];
-      for (final candidate in listCandidates) {
-        final votes = candidateVotes[candidate.id] ?? 0;
-        if (votes > 0) {
-          candidateStatItems.add(
-            CandidateStatItem(
-              candidateName: candidate.candidateName,
-              votes: votes,
-            ),
-          );
-        }
-      }
-
-      // Sort candidates by numerical order extracted from name
-      candidateStatItems.sort((a, b) {
-        int extractNumber(String name) {
-          final match = RegExp(r'\d+').firstMatch(name);
-          return match != null ? int.parse(match.group(0)!) : 999999;
-        }
-
-        int numA = extractNumber(a.candidateName);
-        int numB = extractNumber(b.candidateName);
-        if (numA != numB) {
-          return numA.compareTo(numB);
-        }
-        return b.votes.compareTo(a.votes); // fallback sort by highest votes
-      });
-
-      listStats.add(
-        ListStatItem(
-          listName: list.listName,
-          totalVotes: listVotes[list.id] ?? 0,
-          candidates: candidateStatItems,
-        ),
-      );
-    }
-
-    // Sort lists by highest total votes
-    listStats.sort((a, b) => b.totalVotes.compareTo(a.totalVotes));
+    final listStats = _buildListStats(
+      electoralLists,
+      allCandidates,
+      listVotes,
+      candidateVotes,
+    );
 
     debugPrint(
-      '[DashboardCubit] loadListStats success: lists=${listStats.length}',
+      '[DashboardCubit] loadListStats success: lists=${listStats.length}, '
+      'durationMs=${stopwatch.elapsedMilliseconds}',
     );
     emit(
       currentState.copyWith(
@@ -276,6 +301,7 @@ class DashboardCubit extends Cubit<DashboardState> {
   Future<void> refreshStats() async {
     if (_isRefreshing) return;
     _isRefreshing = true;
+    final stopwatch = Stopwatch()..start();
     final currentState = state;
     final overallResult = await _getVoterStatsUseCase();
 
@@ -333,51 +359,12 @@ class DashboardCubit extends Cubit<DashboardState> {
 
               final listVotes = votesMap['listVotes'] ?? {};
               final candidateVotes = votesMap['candidateVotes'] ?? {};
-
-              final listStats = <ListStatItem>[];
-
-              for (final list in electoralLists) {
-                final listCandidates = allCandidates
-                    .where((c) => c.listId == list.id)
-                    .toList();
-
-                final candidateStatItems = <CandidateStatItem>[];
-                for (final candidate in listCandidates) {
-                  final votes = candidateVotes[candidate.id] ?? 0;
-                  if (votes > 0) {
-                    candidateStatItems.add(
-                      CandidateStatItem(
-                        candidateName: candidate.candidateName,
-                        votes: votes,
-                      ),
-                    );
-                  }
-                }
-
-                candidateStatItems.sort((a, b) {
-                  int extractNumber(String name) {
-                    final match = RegExp(r'\d+').firstMatch(name);
-                    return match != null ? int.parse(match.group(0)!) : 999999;
-                  }
-
-                  int numA = extractNumber(a.candidateName);
-                  int numB = extractNumber(b.candidateName);
-                  if (numA != numB) {
-                    return numA.compareTo(numB);
-                  }
-                  return b.votes.compareTo(a.votes);
-                });
-
-                listStats.add(
-                  ListStatItem(
-                    listName: list.listName,
-                    totalVotes: listVotes[list.id] ?? 0,
-                    candidates: candidateStatItems,
-                  ),
-                );
-              }
-
-              listStats.sort((a, b) => b.totalVotes.compareTo(a.totalVotes));
+              final listStats = _buildListStats(
+                electoralLists,
+                allCandidates,
+                listVotes,
+                candidateVotes,
+              );
 
               nextState = nextState.copyWith(
                 isLoadingListStats: false,
@@ -394,6 +381,10 @@ class DashboardCubit extends Cubit<DashboardState> {
         }
       });
     } finally {
+      debugPrint(
+        '[DashboardCubit] refreshStats completed in '
+        '${stopwatch.elapsedMilliseconds}ms',
+      );
       _isRefreshing = false;
     }
   }

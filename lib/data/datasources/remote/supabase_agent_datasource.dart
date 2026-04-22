@@ -12,6 +12,7 @@ import '../../models/agent_model.dart';
 class SupabaseAgentDatasource {
   final SupabaseClient _client;
   RealtimeChannel? _currentUserPermissionsChannel;
+  String? _currentUserPermissionsUserId;
   final _currentUserPermissionChangesController = StreamController<void>.broadcast();
 
   SupabaseAgentDatasource(this._client);
@@ -41,6 +42,7 @@ class SupabaseAgentDatasource {
     required String username,
     required String password,
     required bool isAdmin,
+    required bool canCreateAgents,
   }) async {
     try {
       final refreshedSession = (await _client.auth.refreshSession()).session;
@@ -59,6 +61,7 @@ class SupabaseAgentDatasource {
           'username': AppConstants.normalizeUsername(username),
           'password': password,
           'is_admin': isAdmin,
+          'can_create_agents': canCreateAgents,
           'access_token': accessToken,
         },
       );
@@ -121,6 +124,42 @@ class SupabaseAgentDatasource {
     }
   }
 
+  Future<void> deleteAgent(String agentId) async {
+    try {
+      final refreshedSession = (await _client.auth.refreshSession()).session;
+      final accessToken =
+          refreshedSession?.accessToken ?? _client.auth.currentSession?.accessToken;
+      if (accessToken == null || accessToken.isEmpty) {
+        throw const ServerException(
+          message: 'جلسة المدير غير صالحة، أعد تسجيل الدخول',
+        );
+      }
+
+      final response = await _client.functions.invoke(
+        'delete-agent',
+        body: {
+          'agent_id': agentId,
+          'access_token': accessToken,
+        },
+      );
+
+      final data = response.data;
+      if (data is Map && data['error'] != null) {
+        throw ServerException(message: data['error'] as String);
+      }
+    } catch (e) {
+      final message = e.toString();
+      if (message.toLowerCase().contains('forbidden')) {
+        throw const ServerException(message: 'غير مصرح لك بحذف هذا الوكيل');
+      }
+      if (message.contains('لا يٌسمح للوكيل بحذف حسابه')) {
+        throw const ServerException(message: 'لا يٌسمح للوكيل بحذف حسابه الشخصي');
+      }
+      if (e is ServerException) rethrow;
+      throw ServerException(message: 'خطأ في حذف الوكيل: $e');
+    }
+  }
+
   Future<List<AgentPermission>> getAgentPermissions(String agentId) async {
     try {
       debugPrint(
@@ -128,7 +167,7 @@ class SupabaseAgentDatasource {
       );
       final data = await _client
           .from('agent_permissions')
-          .select('id, agent_id, family_id, sub_clan_id')
+          .select('id, agent_id, family_id, sub_clan_id, is_manager')
           .eq('agent_id', agentId);
 
       final rows = (data as List).cast<Map<String, dynamic>>();
@@ -151,6 +190,7 @@ class SupabaseAgentDatasource {
     required String agentId,
     int? familyId,
     int? subClanId,
+    bool isManager = false,
   }) async {
     try {
       debugPrint(
@@ -170,8 +210,9 @@ class SupabaseAgentDatasource {
         'add-agent-permission',
         body: {
           'agent_id': agentId,
-          if (familyId != null) 'family_id': familyId,
-          if (subClanId != null) 'sub_clan_id': subClanId,
+          'family_id': ?familyId,
+          'sub_clan_id': ?subClanId,
+          'is_manager': isManager,
           'access_token': accessToken,
         },
       );
@@ -263,6 +304,7 @@ class SupabaseAgentDatasource {
         agentId: json['agent_id'] as String,
         familyId: familyId,
         subClanId: subClanId,
+        isManager: (json['is_manager'] as bool?) ?? false,
         familyName: familyId == null ? null : familyNamesById[familyId],
         subClanName: subClanId == null ? null : subClanNamesById[subClanId],
       );
@@ -271,7 +313,21 @@ class SupabaseAgentDatasource {
 
   void _ensureCurrentUserPermissionSubscription() {
     final user = _client.auth.currentUser;
-    if (user == null || _currentUserPermissionsChannel != null) {
+    if (user == null) {
+      disposeCurrentUserPermissionRealtime();
+      return;
+    }
+
+    if (_currentUserPermissionsChannel != null &&
+        _currentUserPermissionsUserId != user.id) {
+      debugPrint(
+        '[SupabaseAgentDatasource] auth user changed from '
+        '$_currentUserPermissionsUserId to ${user.id}, recreating permission subscription',
+      );
+      disposeCurrentUserPermissionRealtime();
+    }
+
+    if (_currentUserPermissionsChannel != null) {
       return;
     }
 
@@ -279,6 +335,7 @@ class SupabaseAgentDatasource {
       '[SupabaseAgentDatasource] subscribing to current user permission changes: '
       'userId=${user.id}',
     );
+    _currentUserPermissionsUserId = user.id;
 
     _currentUserPermissionsChannel = _client
         .channel('agent_permissions_current_user_${user.id}')
@@ -325,6 +382,7 @@ class SupabaseAgentDatasource {
   void disposeCurrentUserPermissionRealtime() {
     _currentUserPermissionsChannel?.unsubscribe();
     _currentUserPermissionsChannel = null;
+    _currentUserPermissionsUserId = null;
     debugPrint(
       '[SupabaseAgentDatasource] current user permission realtime disposed',
     );

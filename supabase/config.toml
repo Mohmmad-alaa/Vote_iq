@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.add-agent-permission]
 verify_jwt = false
+
+[functions.delete-agent]
+verify_jwt = false

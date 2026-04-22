@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../auth/cubit/auth_cubit.dart';
+import '../../auth/cubit/auth_state.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../common_widgets/error_widget.dart';
 import '../../common_widgets/loading_widget.dart';
@@ -69,7 +71,17 @@ class _AgentsListScreenState extends State<AgentsListScreen> {
                         agent.fullName,
                         style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
-                      subtitle: Text(agent.username),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(agent.username),
+                          if (agent.canCreateAgents && !agent.isAdmin)
+                            const Text(
+                              'مسؤول فريق (يمكنه إنشاء وكلاء)',
+                              style: TextStyle(color: AppColors.primary, fontSize: 12),
+                            ),
+                        ],
+                      ),
                       trailing: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                         decoration: BoxDecoration(
@@ -119,15 +131,18 @@ class _AgentsListScreenState extends State<AgentsListScreen> {
     final userCtrl = TextEditingController();
     final passCtrl = TextEditingController();
     bool isAdmin = false;
+    bool canCreateAgents = false;
     
     final cubit = context.read<AgentsCubit>();
+    final authState = context.read<AuthCubit>().state;
+    final isCurrentUserAdmin = authState is AuthAuthenticated && authState.agent.isAdmin;
 
     showDialog(
       context: context,
       builder: (dialogCtx) {
         return StatefulBuilder(
           builder: (stateContext, setState) => AlertDialog(
-            title: const Text('إضافة وكيل جديد'),
+            title: const Text('إضافة مستخدم جديد'),
             content: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -148,11 +163,31 @@ class _AgentsListScreenState extends State<AgentsListScreen> {
                     obscureText: true,
                   ),
                   const SizedBox(height: 12),
-                  CheckboxListTile(
-                    title: const Text('صلاحيات مدير نظام؟'),
-                    value: isAdmin,
-                    onChanged: (val) => setState(() => isAdmin = val ?? false),
-                  )
+                  if (isCurrentUserAdmin) ...[
+                    CheckboxListTile(
+                      title: const Text('صلاحيات مشرف (Admin)'),
+                      value: isAdmin,
+                      onChanged: (val) {
+                        setState(() {
+                          isAdmin = val ?? false;
+                          if (isAdmin) canCreateAgents = false;
+                        });
+                      },
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
+                    CheckboxListTile(
+                      title: const Text('تمكين إنشاء وكلاء (مسؤول فريق)'),
+                      value: canCreateAgents,
+                      onChanged: isAdmin ? null : (val) {
+                        setState(() {
+                          canCreateAgents = val ?? false;
+                        });
+                      },
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -172,6 +207,7 @@ class _AgentsListScreenState extends State<AgentsListScreen> {
                     username: userCtrl.text.trim(),
                     password: passCtrl.text,
                     isAdmin: isAdmin,
+                    canCreateAgents: canCreateAgents,
                   );
                   Navigator.pop(dialogCtx);
                 },

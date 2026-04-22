@@ -27,6 +27,7 @@ class VoterFilter {
   final int? centerId;
   final String? status;
   final String? searchQuery;
+  final bool includeManageableUnassigned;
   final int page;
   final int pageSize;
 
@@ -36,6 +37,7 @@ class VoterFilter {
     this.centerId,
     this.status,
     this.searchQuery,
+    this.includeManageableUnassigned = false,
     this.page = 0,
     this.pageSize = 50,
   });
@@ -46,6 +48,7 @@ class VoterFilter {
     int? centerId,
     String? status,
     String? searchQuery,
+    bool? includeManageableUnassigned,
     int? page,
     int? pageSize,
   }) {
@@ -55,6 +58,8 @@ class VoterFilter {
       centerId: centerId ?? this.centerId,
       status: status ?? this.status,
       searchQuery: searchQuery ?? this.searchQuery,
+      includeManageableUnassigned:
+          includeManageableUnassigned ?? this.includeManageableUnassigned,
       page: page ?? this.page,
       pageSize: pageSize ?? this.pageSize,
     );
@@ -69,6 +74,9 @@ abstract class VoterRepository {
     VoterFilter filter, {
     bool forceRefresh = false,
   });
+
+  /// Get the total number of voters matching the current filters.
+  Future<Either<Failure, int>> countVoters(VoterFilter filter);
 
   /// Search voters by name (uses pg_trgm similarity search).
   Future<Either<Failure, List<Voter>>> searchVoters(String query);
@@ -132,4 +140,13 @@ abstract class VoterRepository {
 
   /// Get total votes for lists and candidates
   Future<Either<Failure, Map<String, Map<int, int>>>> getListAndCandidateVotes();
+
+  /// Emits an event when background full data sync completes.
+  Stream<void> get onFullSyncComplete;
+
+  /// Clears the local cache when signing out or switching users.
+  Future<void> clearCache();
+
+  /// Reset all voters to default state (not voted, no list/candidate).
+  Future<Either<Failure, void>> resetAllVoters();
 }

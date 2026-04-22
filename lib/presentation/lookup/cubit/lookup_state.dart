@@ -35,6 +35,22 @@ class LookupLoaded extends LookupState {
     required this.candidates,
   });
 
+  LookupLoaded copyWith({
+    List<Family>? families,
+    List<SubClan>? subClans,
+    List<VotingCenter>? centers,
+    List<ElectoralList>? electoralLists,
+    List<Candidate>? candidates,
+  }) {
+    return LookupLoaded(
+      families: families ?? this.families,
+      subClans: subClans ?? this.subClans,
+      centers: centers ?? this.centers,
+      electoralLists: electoralLists ?? this.electoralLists,
+      candidates: candidates ?? this.candidates,
+    );
+  }
+
   @override
   List<Object?> get props => [
         families,

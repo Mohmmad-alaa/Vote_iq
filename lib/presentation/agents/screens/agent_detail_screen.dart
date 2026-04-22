@@ -1,5 +1,8 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:dropdown_search/dropdown_search.dart';
+import '../../auth/cubit/auth_cubit.dart';
+import '../../auth/cubit/auth_state.dart';
 
 import '../../../core/constants/app_colors.dart';
 import '../../../core/di/injection_container.dart';
@@ -38,6 +41,13 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('تفاصيل الوكيل'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.delete, color: Colors.red),
+            onPressed: () => _showDeleteAgentDialog(context, widget.agent.id),
+            tooltip: 'حذف الوكيل',
+          ),
+        ],
       ),
       body: BlocConsumer<AgentsCubit, AgentsState>(
         listener: (context, state) {
@@ -59,8 +69,14 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
               '[AgentDetailScreen] actionMessage: ${state.actionMessage}',
             );
             ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text(state.actionMessage!)),
+              SnackBar(
+                content: Text(state.actionMessage!),
+                backgroundColor: AppColors.success,
+              ),
             );
+            if (state.actionMessage == 'تم حذف الوكيل بنجاح') {
+              Navigator.pop(context);
+            }
           }
         },
         builder: (context, state) {
@@ -230,18 +246,44 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
     );
   }
 
+  void _showDeleteAgentDialog(BuildContext context, String agentId) {
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Text('حذف الوكيل', style: TextStyle(color: Colors.red)),
+        content: const Text(
+            'هل أنت متأكد من رغبتك في حذف هذا الوكيل نهائياً؟\nسيؤدي هذا إلى حذفه وعدم قدرته على الدخول مرة أخرى.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('إلغاء'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(dialogCtx);
+              context.read<AgentsCubit>().deleteAgent(agentId);
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.error),
+            child: const Text('نعم، احذف', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
   String _formatPermissionScope(AgentPermission permission) {
+    final String managerSuffix = permission.isManager ? ' (مسؤول)' : '';
     if (permission.isGlobalAccess) {
-      return 'وصول شامل';
+      return 'وصول شامل$managerSuffix';
     }
 
     final familyLabel = permission.familyName ?? '#${permission.familyId}';
     if (permission.isFamilyLevel) {
-      return 'عائلة: $familyLabel';
+      return 'عائلة: $familyLabel$managerSuffix';
     }
 
     final subClanLabel = permission.subClanName ?? '#${permission.subClanId}';
-    return 'عائلة: $familyLabel - فرع: $subClanLabel';
+    return 'عائلة: $familyLabel - فرع: $subClanLabel$managerSuffix';
   }
 
   Future<void> _showAddPermissionDialog(
@@ -249,8 +291,11 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
     String agentId,
   ) async {
     final agentsCubit = context.read<AgentsCubit>();
+    final authState = context.read<AuthCubit>().state;
+    final isCurrentUserAdmin = authState is AuthAuthenticated && authState.agent.isAdmin;
+    
     debugPrint(
-      '[AgentDetailScreen] open add-permission dialog: agentId=$agentId',
+      '[AgentDetailScreen] open add-permission dialog: agentId=$agentId, isAdmin=$isCurrentUserAdmin',
     );
     final lookupRepository = sl<LookupRepository>();
     final familiesResult = await lookupRepository.getFamilies();
@@ -260,13 +305,14 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
     List<Family> families = const [];
     familiesResult.fold((_) {}, (value) => families = value);
 
-    String scope = 'global';
+    String scope = 'family';
     int? selectedFamilyId;
     int? selectedSubClanId;
     String familySearchQuery = '';
     List<SubClan> subClans = const [];
     bool isLoadingSubClans = false;
     bool isSubmitting = false;
+    bool isManager = false;
 
     Future<void> loadSubClans(StateSetter setState, int familyId) async {
       setState(() {
@@ -320,27 +366,28 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 DropdownButtonFormField<String>(
-                  value: scope,
+                  initialValue: scope,
                   decoration: const InputDecoration(labelText: 'نوع الصلاحية'),
-                  items: const [
-                    DropdownMenuItem(
-                      value: 'global',
-                      child: Text('وصول شامل'),
-                    ),
-                    DropdownMenuItem(
+                  items: [
+                    const DropdownMenuItem(
                       value: 'family',
                       child: Text('عائلة كاملة'),
                     ),
-                    DropdownMenuItem(
+                    const DropdownMenuItem(
                       value: 'subclan',
                       child: Text('فرع محدد'),
                     ),
+                    if (isCurrentUserAdmin)
+                      const DropdownMenuItem(
+                        value: 'global',
+                        child: Text('وصول شامل (جميع العائلات والفروع)'),
+                      ),
                   ],
                   onChanged: isSubmitting
                       ? null
                       : (value) {
                           setState(() {
-                            scope = value ?? 'global';
+                            scope = value ?? 'family';
                             selectedFamilyId = null;
                             selectedSubClanId = null;
                             familySearchQuery = '';
@@ -348,7 +395,7 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
                           });
                         },
                 ),
-                if (scope == 'family' || scope == 'subclan') ...[
+                if (scope == 'family') ...[
                   const SizedBox(height: 12),
                   TextField(
                     enabled: !isSubmitting,
@@ -364,7 +411,7 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
                   ),
                   const SizedBox(height: 12),
                   DropdownButtonFormField<int>(
-                    value: selectedFamilyStillVisible ? selectedFamilyId : null,
+                    initialValue: selectedFamilyStillVisible ? selectedFamilyId : null,
                     decoration: const InputDecoration(labelText: 'العائلة'),
                     items: filteredFamilies
                         .map(
@@ -381,9 +428,6 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
                             setState(() {
                               selectedFamilyId = value;
                             });
-                            if (scope == 'subclan') {
-                              await loadSubClans(setState, value);
-                            }
                           },
                   ),
                   if (filteredFamilies.isEmpty)
@@ -400,28 +444,63 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
                 ],
                 if (scope == 'subclan') ...[
                   const SizedBox(height: 12),
-                  if (isLoadingSubClans)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 12),
-                      child: CircularProgressIndicator(),
-                    )
-                  else
-                    DropdownButtonFormField<int>(
-                      value: selectedSubClanId,
-                      decoration: const InputDecoration(labelText: 'الفرع'),
-                      items: subClans
-                          .map(
-                            (subClan) => DropdownMenuItem(
-                              value: subClan.id,
-                              child: Text(subClan.subName),
-                            ),
-                          )
-                          .toList(),
+                  DropdownSearch<SubClan>(
+                    popupProps: const PopupProps.menu(
+                      showSearchBox: true,
+                      searchFieldProps: TextFieldProps(
+                        decoration: InputDecoration(
+                          hintText: 'ابحث عن فرع...',
+                          prefixIcon: Icon(Icons.search),
+                        ),
+                      ),
+                    ),
+                    items: (String filter, _) async {
+                      final result = await lookupRepository.getSubClans();
+                      return result.fold(
+                        (_) => [],
+                        (subClans) {
+                          if (filter.isEmpty) return subClans;
+                          return subClans.where((s) =>
+                              s.subName.toLowerCase().contains(filter.toLowerCase()) ||
+                              (s.familyName?.toLowerCase().contains(filter.toLowerCase()) ?? false)
+                          ).toList();
+                        },
+                      );
+                    },
+                    itemAsString: (SubClan s) => '${s.subName} (${s.familyName ?? "بدون عائلة"})',
+                    compareFn: (item, selectedItem) => item.id == selectedItem.id,
+                    dropdownBuilder: (context, selectedItem) {
+                      return InputDecorator(
+                        decoration: const InputDecoration(
+                          labelText: 'الفرع',
+                          border: OutlineInputBorder(),
+                        ),
+                        child: Text(selectedItem != null 
+                            ? '${selectedItem.subName} (${selectedItem.familyName ?? "بدون عائلة"})'
+                            : 'اختر الفرع...'),
+                      );
+                    },
+                    onChanged: isSubmitting
+                        ? null
+                        : (SubClan? value) {
+                            setState(() {
+                              selectedSubClanId = value?.id;
+                              selectedFamilyId = value?.familyId;
+                            });
+                          },
+                  ),
+                ],
+                if (isCurrentUserAdmin) ...[
+                    const SizedBox(height: 12),
+                    SwitchListTile(
+                      title: const Text('صلاحيات مسؤول (إدارة)'),
+                      subtitle: const Text('يمكنه التحديث الجماعي للفروع في هذا النطاق'),
+                      value: isManager,
                       onChanged: isSubmitting
                           ? null
-                          : (value) {
+                          : (val) {
                               setState(() {
-                                selectedSubClanId = value;
+                                isManager = val;
                               });
                             },
                     ),
@@ -457,7 +536,7 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
                         '[AgentDetailScreen] submit permission: '
                         'agentId=$agentId, '
                         'scope=$scope, '
-                        'familyId=${scope == 'global' ? null : selectedFamilyId}, '
+                        'familyId=$selectedFamilyId, '
                         'subClanId=${scope == 'subclan' ? selectedSubClanId : null}',
                       );
 
@@ -465,6 +544,7 @@ class _AgentDetailScreenState extends State<AgentDetailScreen> {
                         agentId: agentId,
                         familyId: scope == 'global' ? null : selectedFamilyId,
                         subClanId: scope == 'subclan' ? selectedSubClanId : null,
+                        isManager: isManager,
                       );
 
                       if (!dialogContext.mounted) return;

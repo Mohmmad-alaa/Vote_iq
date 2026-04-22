@@ -29,6 +29,62 @@ class _VotersListScreenState extends State<VotersListScreen> {
   final _debouncer = Debouncer(milliseconds: AppConstants.searchDebounceMs);
   int? _selectedFamilyId;
   int? _selectedSubClanId;
+  bool _isSearching = false;
+
+  String _normalizeLookupName(String value) => value.trim();
+
+  Map<String, List<int>> _groupFamilyIdsByName(LookupLoaded state) {
+    final grouped = <String, List<int>>{};
+    for (final family in state.families) {
+      final familyName = _normalizeLookupName(family.familyName);
+      grouped.putIfAbsent(familyName, () => <int>[]).add(family.id);
+    }
+    for (final ids in grouped.values) {
+      ids.sort();
+    }
+    return grouped;
+  }
+
+  List<int>? _selectedFamilyIds(LookupState state) {
+    if (_selectedFamilyId == null) {
+      return null;
+    }
+    if (state is! LookupLoaded) {
+      return [_selectedFamilyId!];
+    }
+
+    String? selectedFamilyName;
+    for (final family in state.families) {
+      if (family.id == _selectedFamilyId) {
+        selectedFamilyName = _normalizeLookupName(family.familyName);
+        break;
+      }
+    }
+
+    if (selectedFamilyName == null) {
+      return [_selectedFamilyId!];
+    }
+
+    return _groupFamilyIdsByName(state)[selectedFamilyName] ?? [_selectedFamilyId!];
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final votersCubit = context.read<VotersCubit>();
+      votersCubit.subscribeToRealtime();
+      if (votersCubit.state is VotersInitial || votersCubit.state is VotersError) {
+        votersCubit.loadVoters();
+      }
+
+      final lookupCubit = context.read<LookupCubit>();
+      if (lookupCubit.state is LookupInitial || lookupCubit.state is LookupError) {
+        lookupCubit.loadAll();
+      }
+    });
+  }
 
   @override
   void dispose() {
@@ -39,9 +95,10 @@ class _VotersListScreenState extends State<VotersListScreen> {
   void _applyFilters(BuildContext context, {String? status}) {
     final state = context.read<VotersCubit>().state;
     final currentStatus = status ?? (state is VotersLoaded ? state.filterStatus : null);
+    final lookupState = context.read<LookupCubit>().state;
     
     context.read<VotersCubit>().loadVoters(
-      familyIds: _selectedFamilyId != null ? [_selectedFamilyId!] : null,
+      familyIds: _selectedFamilyIds(lookupState),
       subClanId: _selectedSubClanId,
       status: currentStatus,
     );
@@ -60,22 +117,53 @@ class _VotersListScreenState extends State<VotersListScreen> {
           child: Column(
             children: [
               CustomSearchField(
+                isSearching: _isSearching,
                 onChanged: (value) {
-                  _debouncer.run(() {
-                    context.read<VotersCubit>().searchVoters(value);
-                  });
+                  final trimmed = value.trim();
+                  if (trimmed.isEmpty) {
+                    // Clear search immediately, no spinner needed
+                    _debouncer.cancel();
+                    setState(() => _isSearching = false);
+                    context.read<VotersCubit>().searchVoters('');
+                  } else {
+                    setState(() => _isSearching = true);
+                    _debouncer.run(() {
+                      context.read<VotersCubit>().searchVoters(trimmed).then((_) {
+                        if (mounted) setState(() => _isSearching = false);
+                      });
+                    });
+                  }
                 },
               ),
               const SizedBox(height: 12),
               BlocBuilder<LookupCubit, LookupState>(
+                buildWhen: (previous, current) =>
+                    previous.runtimeType != current.runtimeType ||
+                    (previous is LookupLoaded &&
+                        current is LookupLoaded &&
+                        (previous.families != current.families ||
+                            previous.subClans != current.subClans)),
                 builder: (context, lookupState) {
                   if (lookupState is! LookupLoaded) return const SizedBox.shrink();
                   
+                  final familyOptions = _groupFamilyIdsByName(lookupState).entries.toList()
+                    ..sort((a, b) => a.key.compareTo(b.key));
+                  final selectedFamilyIds = _selectedFamilyIds(lookupState);
+                  int? selectedFamilyValue;
+                  if (_selectedFamilyId != null) {
+                    for (final entry in familyOptions) {
+                      if (entry.value.contains(_selectedFamilyId)) {
+                        selectedFamilyValue = entry.value.first;
+                        break;
+                      }
+                    }
+                  }
+
                   // Filter sub-clans based on selected family
-                  final availableSubClans = _selectedFamilyId == null
+                  final availableSubClans = selectedFamilyIds == null
                       ? lookupState.subClans
                       : lookupState.subClans
-                          .where((s) => s.familyId == _selectedFamilyId)
+                          .where((s) => selectedFamilyIds.contains(s.familyId))
                           .toList();
 
                   return Row(
@@ -91,16 +179,16 @@ class _VotersListScreenState extends State<VotersListScreen> {
                           child: DropdownButtonHideUnderline(
                             child: DropdownButton<int?>(
                               hint: const Text('العائلة'),
-                              value: _selectedFamilyId,
+                              value: selectedFamilyValue,
                               isExpanded: true,
                               items: [
                                 const DropdownMenuItem<int?>(
                                   value: null,
                                   child: Text('الكل (العائلة)'),
                                 ),
-                                ...lookupState.families.map((f) => DropdownMenuItem(
-                                      value: f.id,
-                                      child: Text(f.familyName),
+                                ...familyOptions.map((entry) => DropdownMenuItem(
+                                      value: entry.value.first,
+                                      child: Text(entry.key),
                                     )),
                               ],
                               onChanged: (val) {
@@ -154,6 +242,11 @@ class _VotersListScreenState extends State<VotersListScreen> {
               ),
               const SizedBox(height: 12),
               BlocBuilder<VotersCubit, VotersState>(
+                buildWhen: (previous, current) =>
+                    previous.runtimeType != current.runtimeType ||
+                    (previous is VotersLoaded &&
+                        current is VotersLoaded &&
+                        previous.filterStatus != current.filterStatus),
                 builder: (context, state) {
                   String? selectedStatus;
                   if (state is VotersLoaded) {
@@ -175,6 +268,43 @@ class _VotersListScreenState extends State<VotersListScreen> {
                   );
                 },
               ),
+              const SizedBox(height: 8),
+              BlocBuilder<VotersCubit, VotersState>(
+                buildWhen: (previous, current) =>
+                    previous.runtimeType != current.runtimeType ||
+                    (previous is VotersLoaded &&
+                        current is VotersLoaded &&
+                        (previous.voters != current.voters ||
+                            previous.totalCount != current.totalCount)),
+                builder: (context, state) {
+                  if (state is! VotersLoaded) {
+                    return const SizedBox.shrink();
+                  }
+
+                  return Align(
+                    alignment: Alignment.centerRight,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.grey.shade300),
+                      ),
+                      child: Text(
+                        '${state.voters.length} / ${state.totalCount}',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
             ],
           ),
         ),
@@ -182,9 +312,17 @@ class _VotersListScreenState extends State<VotersListScreen> {
         // Table Body
         Expanded(
           child: BlocBuilder<VotersCubit, VotersState>(
+            buildWhen: (previous, current) =>
+                previous.runtimeType != current.runtimeType ||
+                (previous is VotersLoaded &&
+                    current is VotersLoaded &&
+                    (previous.voters != current.voters ||
+                        previous.isLoadingMore != current.isLoadingMore ||
+                        previous.hasReachedEnd != current.hasReachedEnd)),
             builder: (context, state) {
+              // Only show shimmer on initial load, never during search
               if (state is VotersInitial ||
-                  (state is VotersLoading &&
+                  (state is VotersLoading && !_isSearching &&
                       context.read<VotersCubit>().state is! VotersLoaded)) {
                 return const ShimmerLoader();
               }

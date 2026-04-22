@@ -9,7 +9,6 @@ import '../../../domain/repositories/voter_repository.dart';
 import '../../common_widgets/error_widget.dart';
 import '../../common_widgets/excel_filter_header.dart';
 import '../../common_widgets/loading_widget.dart';
-import '../../common_widgets/stats_card.dart';
 import '../cubit/dashboard_cubit.dart';
 import '../cubit/dashboard_state.dart';
 
@@ -26,6 +25,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final Set<String> _selectedFamilies = {};
   final Set<String> _selectedSubClans = {};
   bool _showAllFamilies = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final cubit = context.read<DashboardCubit>();
+      if (cubit.state is DashboardInitial || cubit.state is DashboardError) {
+        cubit.loadStats();
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -64,47 +75,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   color: AppColors.primary,
                 ),
                 const SizedBox(height: 16),
-                Builder(
-                  builder: (context) {
-                    final crossAxisCount =
-                        ResponsiveHelper.getGridCrossAxisCount(context);
-                    return GridView.count(
-                      crossAxisCount: crossAxisCount,
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      mainAxisSpacing: 16,
-                      crossAxisSpacing: 16,
-                      childAspectRatio: 1.1,
-                      children: [
-                        StatsCard(
-                          title: 'إجمالي الناخبين',
-                          count: overall.total,
-                          icon: Icons.people_alt_rounded,
-                          color: AppColors.primary,
-                        ),
-                        StatsCard(
-                          title: 'تم التصويت',
-                          count: overall.voted,
-                          icon: Icons.check_circle_rounded,
-                          color: AppColors.statusVoted,
-                          percentage: overall.votedPercentage,
-                        ),
-                        StatsCard(
-                          title: 'لم يُصوّت',
-                          count: overall.notVoted,
-                          icon: Icons.pending_actions_rounded,
-                          color: AppColors.statusNotVoted,
-                        ),
-                        StatsCard(
-                          title: 'رفض التصويت',
-                          count: overall.refused,
-                          icon: Icons.cancel_rounded,
-                          color: AppColors.statusRefused,
-                        ),
-                      ],
-                    );
-                  },
-                ),
+                _buildOverallStatsGrid(overall.total, overall.voted,
+                    overall.votedPercentage, overall.notVoted, overall.refused),
                 const SizedBox(height: 32),
                 if (overall.total > 0) ...[
                   _buildSectionHeader(
@@ -924,6 +896,46 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  Widget _buildOverallStatsGrid(
+    int total,
+    int voted,
+    double votedPct,
+    int notVoted,
+    int refused,
+  ) {
+    final items = [
+      _StatItem(label: 'إجمالي الناخبين', value: total,
+          icon: Icons.people_alt_rounded, color: AppColors.primary),
+      _StatItem(label: 'تم التصويت', value: voted,
+          icon: Icons.check_circle_rounded, color: AppColors.statusVoted,
+          badge: '${votedPct.toStringAsFixed(1)}%'),
+      _StatItem(label: 'لم يُصوّت', value: notVoted,
+          icon: Icons.pending_actions_rounded, color: AppColors.statusNotVoted),
+      _StatItem(label: 'رفض التصويت', value: refused,
+          icon: Icons.cancel_rounded, color: AppColors.statusRefused),
+    ];
+
+    return Column(
+      children: [
+        Row(
+          children: [
+            Expanded(child: _CompactStatCard(item: items[0])),
+            const SizedBox(width: 12),
+            Expanded(child: _CompactStatCard(item: items[1])),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(child: _CompactStatCard(item: items[2])),
+            const SizedBox(width: 12),
+            Expanded(child: _CompactStatCard(item: items[3])),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _buildSectionHeader({
     required IconData icon,
     required String title,
@@ -963,6 +975,116 @@ class _DashboardScreenState extends State<DashboardScreen> {
         const SizedBox(width: 6),
         Text(label, style: const TextStyle(fontSize: 13)),
       ],
+    );
+  }
+}
+
+/// ── Data class for a single stat item ──────────────────────────────────────
+class _StatItem {
+  const _StatItem({
+    required this.label,
+    required this.value,
+    required this.icon,
+    required this.color,
+    this.badge,
+  });
+  final String label;
+  final int value;
+  final IconData icon;
+  final Color color;
+  final String? badge;
+}
+
+/// ── Compact horizontal stat card ────────────────────────────────────────────
+class _CompactStatCard extends StatelessWidget {
+  const _CompactStatCard({required this.item});
+  final _StatItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: item.color.withValues(alpha: 0.15),
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: item.color.withValues(alpha: 0.07),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          // ── Icon bubble ──────────────────────
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: item.color.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(item.icon, color: item.color, size: 22),
+          ),
+          const SizedBox(width: 12),
+          // ── Text ────────────────────────────
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: AlignmentDirectional.centerStart,
+                  child: Text(
+                    item.value.toString(),
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: item.color,
+                      height: 1.1,
+                    ),
+                  ),
+                ),
+                Text(
+                  item.label,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: AppColors.textSecondary,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          // ── Badge (percentage) ───────────────
+          if (item.badge != null) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              decoration: BoxDecoration(
+                color: item.color.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                item.badge!,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  color: item.color,
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

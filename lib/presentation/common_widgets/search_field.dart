@@ -4,11 +4,13 @@ import '../../../core/constants/app_colors.dart';
 class CustomSearchField extends StatefulWidget {
   final ValueChanged<String> onChanged;
   final String hintText;
+  final bool isSearching;
 
   const CustomSearchField({
     super.key,
     required this.onChanged,
-    this.hintText = 'بحث عن ناخب...',
+    this.hintText = 'بحث بالاسم، الأب، الجد، العائلة، الرقم...',
+    this.isSearching = false,
   });
 
   @override
@@ -17,10 +19,12 @@ class CustomSearchField extends StatefulWidget {
 
 class _CustomSearchFieldState extends State<CustomSearchField> {
   final TextEditingController _controller = TextEditingController();
+  final FocusNode _focusNode = FocusNode();
 
   @override
   void dispose() {
     _controller.dispose();
+    _focusNode.dispose();
     super.dispose();
   }
 
@@ -40,16 +44,37 @@ class _CustomSearchFieldState extends State<CustomSearchField> {
       ),
       child: TextField(
         controller: _controller,
-        onChanged: widget.onChanged,
+        focusNode: _focusNode,
+        onChanged: (value) {
+          setState(() {}); // rebuild to show/hide clear button
+          widget.onChanged(value);
+        },
         decoration: InputDecoration(
           hintText: widget.hintText,
-          prefixIcon: const Icon(Icons.search, color: AppColors.primary),
+          hintStyle: TextStyle(
+            color: AppColors.textSecondary.withValues(alpha: 0.6),
+            fontSize: 14,
+          ),
+          prefixIcon: widget.isSearching
+              ? const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: AppColors.primary,
+                    ),
+                  ),
+                )
+              : const Icon(Icons.search, color: AppColors.primary),
           suffixIcon: _controller.text.isNotEmpty
               ? IconButton(
                   icon: const Icon(Icons.clear, color: AppColors.textSecondary),
                   onPressed: () {
                     _controller.clear();
                     widget.onChanged('');
+                    setState(() {});
                   },
                 )
               : null,

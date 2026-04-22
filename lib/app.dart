@@ -54,15 +54,13 @@ class VoteIQApp extends StatelessWidget {
               return MultiBlocProvider(
                 providers: [
                   BlocProvider<VotersCubit>(
-                    create: (_) => sl<VotersCubit>()
-                      ..loadVoters()
-                      ..subscribeToRealtime(),
+                    create: (_) => sl<VotersCubit>(),
                   ),
                   BlocProvider<DashboardCubit>(
-                    create: (_) => sl<DashboardCubit>()..loadStats(),
+                    create: (_) => sl<DashboardCubit>(),
                   ),
                   BlocProvider<LookupCubit>(
-                    create: (_) => sl<LookupCubit>()..loadAll(),
+                    create: (_) => sl<LookupCubit>(),
                   ),
                 ],
                 child: HomeScreen(agent: state.agent),

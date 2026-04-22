@@ -20,11 +20,13 @@ class AddAgentPermissionUseCase {
     required String agentId,
     int? familyId,
     int? subClanId,
+    bool isManager = false,
   }) async {
     return await repository.addAgentPermission(
       agentId: agentId,
       familyId: familyId,
       subClanId: subClanId,
+      isManager: isManager,
     );
   }
 }

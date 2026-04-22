@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
-
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../../core/constants/app_constants.dart';
 import '../../../domain/entities/voter.dart';
 import '../../../domain/repositories/voter_repository.dart';
 import '../../../domain/usecases/voter/get_voters_usecase.dart';
@@ -25,6 +25,9 @@ class VotersCubit extends Cubit<VotersState> {
   final VoterRepository _voterRepository;
 
   StreamSubscription? _realtimeSubscription;
+  StreamSubscription? _syncSubscription;
+  int _currentPage = 0;
+  bool _isLoadingMore = false;
 
   static final RegExp _searchSanitizer = RegExp(r'[^\w\s\u0600-\u06FF]');
 
@@ -45,7 +48,13 @@ class VotersCubit extends Cubit<VotersState> {
        _deleteVoterUseCase = deleteVoterUseCase,
        _importVotersUseCase = importVotersUseCase,
        _voterRepository = voterRepository,
-       super(const VotersInitial());
+       super(const VotersInitial()) {
+    _syncSubscription = _voterRepository.onFullSyncComplete.listen((_) {
+      if (!isClosed) {
+        refreshCurrentView(forceRefresh: false, restartRealtime: false);
+      }
+    });
+  }
 
   Future<void> _loadFilteredVoters({
     List<int>? familyIds,
@@ -56,10 +65,12 @@ class VotersCubit extends Cubit<VotersState> {
     bool forceRefresh = false,
     bool silentRefresh = false,
   }) async {
+    final stopwatch = Stopwatch()..start();
     final currentState = state is VotersLoaded ? state as VotersLoaded : null;
     final effectiveSearchQuery = searchQuery == _keepCurrentSearch
         ? currentState?.searchQuery
         : (searchQuery as String?)?.trim();
+    const pageSize = AppConstants.pageSize;
 
     if (!silentRefresh) {
       emit(const VotersLoading());
@@ -74,28 +85,40 @@ class VotersCubit extends Cubit<VotersState> {
           ? null
           : effectiveSearchQuery,
       page: 0,
-      pageSize: 0,
+      pageSize: pageSize,
     );
 
-    final result = await _getVotersUseCase(filter, forceRefresh: forceRefresh);
+    final resultFuture = _getVotersUseCase(filter, forceRefresh: forceRefresh);
+    final countFuture = _voterRepository.countVoters(filter);
+    final result = await resultFuture;
+    final countResult = await countFuture;
+    final totalCount = countResult.fold((_) => 0, (count) => count);
 
     result.fold(
       (failure) {
+        debugPrint(
+          '[VotersCubit] load failed after ${stopwatch.elapsedMilliseconds}ms: '
+          '${failure.message}',
+        );
         debugPrint('[VotersCubit] load failed: ${failure.message}');
         if (!silentRefresh) {
           emit(VotersError(failure.message));
         }
       },
       (voters) {
+        _currentPage = 0;
+        _isLoadingMore = false;
         debugPrint(
           '[VotersCubit] load success: count=${voters.length}, '
           'familyIds=$familyIds, subClanId=$subClanId, centerId=$centerId, '
-          'status=$status, searchQuery=${filter.searchQuery}',
+          'status=$status, searchQuery=${filter.searchQuery}, '
+          'durationMs=${stopwatch.elapsedMilliseconds}',
         );
         emit(
           VotersLoaded(
             voters: voters,
-            hasReachedEnd: true,
+            totalCount: totalCount > 0 ? totalCount : voters.length,
+            hasReachedEnd: voters.length < pageSize,
             filterFamilyIds: familyIds,
             filterSubClanId: subClanId,
             filterCenterId: centerId,
@@ -124,10 +147,77 @@ class VotersCubit extends Cubit<VotersState> {
     );
   }
 
-  /// Infinite scroll is no longer needed because the full register is loaded.
-  Future<void> loadMore() async {}
+  Future<void> loadMore() async {
+    final currentState = state;
+    if (currentState is! VotersLoaded ||
+        currentState.hasReachedEnd ||
+        currentState.isLoadingMore ||
+        _isLoadingMore) {
+      return;
+    }
+
+    _isLoadingMore = true;
+    emit(currentState.copyWith(isLoadingMore: true));
+    final stopwatch = Stopwatch()..start();
+    final nextPage = _currentPage + 1;
+
+    final filter = VoterFilter(
+      familyIds: currentState.filterFamilyIds,
+      subClanId: currentState.filterSubClanId,
+      centerId: currentState.filterCenterId,
+      status: currentState.filterStatus,
+      searchQuery: currentState.searchQuery,
+      page: nextPage,
+      pageSize: AppConstants.pageSize,
+    );
+
+    final result = await _getVotersUseCase(filter);
+    result.fold(
+      (failure) {
+        _isLoadingMore = false;
+        debugPrint(
+          '[VotersCubit] loadMore failed after ${stopwatch.elapsedMilliseconds}ms: '
+          '${failure.message}',
+        );
+        if (!isClosed && state is VotersLoaded) {
+          emit((state as VotersLoaded).copyWith(isLoadingMore: false));
+        }
+      },
+      (nextPageVoters) {
+        _isLoadingMore = false;
+        _currentPage = nextPage;
+
+        final merged = <Voter>[...currentState.voters];
+        final existingSymbols = currentState.voters
+            .map((voter) => voter.voterSymbol)
+            .toSet();
+
+        for (final voter in nextPageVoters) {
+          if (existingSymbols.add(voter.voterSymbol)) {
+            merged.add(voter);
+          }
+        }
+
+        debugPrint(
+          '[VotersCubit] loadMore success: page=$nextPage, '
+          'count=${nextPageVoters.length}, total=${merged.length}, '
+          'durationMs=${stopwatch.elapsedMilliseconds}',
+        );
+        emit(
+          currentState.copyWith(
+            voters: merged,
+            totalCount: currentState.totalCount,
+            isLoadingMore: false,
+            hasReachedEnd: nextPageVoters.length < AppConstants.pageSize,
+          ),
+        );
+      },
+    );
+  }
 
   /// Search inside the full local register while preserving active filters.
+  /// Uses silentRefresh to avoid showing shimmer — keeps current data visible
+  /// while search results update seamlessly.
   Future<void> searchVoters(String query) async {
     final currentState = state is VotersLoaded ? state as VotersLoaded : null;
 
@@ -137,6 +227,7 @@ class VotersCubit extends Cubit<VotersState> {
       centerId: currentState?.filterCenterId,
       status: currentState?.filterStatus,
       searchQuery: query,
+      silentRefresh: currentState != null, // silent only when data is already loaded
     );
   }
 
@@ -173,6 +264,22 @@ class VotersCubit extends Cubit<VotersState> {
       status: currentState?.filterStatus,
       searchQuery: currentState?.searchQuery ?? '',
       forceRefresh: forceRefresh,
+      silentRefresh: true, // Prevent loading shimmer from clearing the UI
+    );
+  }
+
+  /// Reset all voters to 'not voted'
+  Future<void> resetAllVoters() async {
+    emit(const VotersLoading());
+    final result = await _voterRepository.resetAllVoters();
+    result.fold(
+      (failure) {
+        emit(VotersError(failure.message));
+        _reloadCurrentView();
+      },
+      (_) {
+        refreshCurrentView(forceRefresh: true);
+      },
     );
   }
 
@@ -251,11 +358,15 @@ class VotersCubit extends Cubit<VotersState> {
   }
 
   /// Update an existing voter's details.
-  Future<void> updateVoter(Voter voter) async {
+  Future<void> updateVoter(Voter voter, {bool reload = true}) async {
     final result = await _updateVoterUseCase(voter);
     await result.fold(
-      (f) async => emit(VotersError(f.message)),
-      (_) => _reloadCurrentView(),
+      (f) async {
+        if (reload) emit(VotersError(f.message));
+      },
+      (_) {
+        if (reload) _reloadCurrentView();
+      },
     );
   }
 
@@ -275,14 +386,12 @@ class VotersCubit extends Cubit<VotersState> {
     final result = await _importVotersUseCase(filePath);
     result.fold(
       (f) {
-        print('DEBUG: VotersCubit: Import FAILED: ' + f.message);
+        print('DEBUG: VotersCubit: Import FAILED: ${f.message}');
         emit(VotersError(f.message));
       },
       (count) {
         print(
-          'DEBUG: VotersCubit: Import SUCCESS. Imported ' +
-              count.toString() +
-              ' voters.',
+          'DEBUG: VotersCubit: Import SUCCESS. Imported $count voters.',
         );
         loadVoters();
       },
@@ -303,6 +412,10 @@ class VotersCubit extends Cubit<VotersState> {
 
   /// Subscribe to real-time voter changes.
   void subscribeToRealtime() {
+    if (_realtimeSubscription != null) {
+      return;
+    }
+
     _realtimeSubscription = _voterRepository.voterChanges.listen((
       updatedVoter,
     ) {
@@ -327,6 +440,7 @@ class VotersCubit extends Cubit<VotersState> {
     if (currentState is! VotersLoaded) return;
 
     final updatedList = List<Voter>.from(currentState.voters);
+    var updatedTotalCount = currentState.totalCount;
     final existingIndex = updatedList.indexWhere(
       (v) => v.voterSymbol == updatedVoter.voterSymbol,
     );
@@ -337,6 +451,9 @@ class VotersCubit extends Cubit<VotersState> {
         updatedList[existingIndex] = updatedVoter;
       } else {
         updatedList.removeAt(existingIndex);
+        if (updatedTotalCount > 0) {
+          updatedTotalCount--;
+        }
       }
     } else if (matchesCurrentView) {
       // Binary insert to maintain sorted order without full re-sort
@@ -351,11 +468,19 @@ class VotersCubit extends Cubit<VotersState> {
         }
       }
       updatedList.insert(lo, updatedVoter);
+      if (currentState.hasReachedEnd) {
+        updatedTotalCount++;
+      }
     } else {
       return;
     }
 
-    emit(currentState.copyWith(voters: updatedList));
+    emit(
+      currentState.copyWith(
+        voters: updatedList,
+        totalCount: updatedTotalCount,
+      ),
+    );
   }
 
   bool _matchesCurrentView(Voter voter, VotersLoaded state) {
@@ -418,6 +543,7 @@ class VotersCubit extends Cubit<VotersState> {
   @override
   Future<void> close() {
     _realtimeSubscription?.cancel();
+    _syncSubscription?.cancel();
     _voterRepository.disposeRealtime();
     return super.close();
   }

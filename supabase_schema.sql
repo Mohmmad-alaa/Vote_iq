@@ -110,8 +110,20 @@ CREATE POLICY "voters_agent_access" ON voters
         AND EXISTS (
             SELECT 1 FROM agent_permissions ap
             WHERE ap.agent_id = auth.uid()
-              AND (ap.family_id IS NULL OR ap.family_id = voters.family_id)
-              AND (ap.sub_clan_id IS NULL OR ap.sub_clan_id = voters.sub_clan_id)
+              AND (
+                  ap.family_id IS NULL
+                  OR (
+                      ap.family_id = voters.family_id
+                      AND (
+                          ap.sub_clan_id IS NULL
+                          OR ap.sub_clan_id = voters.sub_clan_id
+                      )
+                  )
+                  OR (
+                      ap.is_manager = TRUE
+                      AND voters.sub_clan_id IS NULL
+                  )
+              )
         )
     );
 

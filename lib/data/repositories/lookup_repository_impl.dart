@@ -32,6 +32,11 @@ class LookupRepositoryImpl implements LookupRepository {
         _importService = importService;
 
   @override
+  Future<void> clearCache() {
+    return _localDatasource.clearCache();
+  }
+
+  @override
   Future<Either<Failure, List<Family>>> getFamilies() async {
     try {
       if (await _connectivity.hasInternet) {

@@ -11,6 +11,7 @@ abstract class AgentRepository {
     required String username,
     required String password,
     bool isAdmin = false,
+    bool canCreateAgents = false,
   });
   
   Future<Either<Failure, Agent>> updateAgentStatus({
@@ -24,7 +25,9 @@ abstract class AgentRepository {
     required String agentId,
     int? familyId,
     int? subClanId,
+    bool isManager = false,
   });
 
   Future<Either<Failure, void>> removeAgentPermission(int permissionId);
+  Future<Either<Failure, void>> deleteAgent(String agentId);
 }

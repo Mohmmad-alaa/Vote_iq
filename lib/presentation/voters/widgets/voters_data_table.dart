@@ -7,6 +7,8 @@ import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_constants.dart';
 import '../../../domain/entities/voter.dart';
 import '../../common_widgets/excel_filter_header.dart';
+import '../../lookup/cubit/lookup_cubit.dart';
+import '../../lookup/cubit/lookup_state.dart';
 import '../cubit/voters_cubit.dart';
 import '../cubit/voters_state.dart';
 
@@ -54,9 +56,44 @@ class _VotersDataTableState extends State<VotersDataTable> {
   final ScrollController _scrollController = ScrollController();
   int _visibleCount = AppConstants.pageSize;
   int _lastDatasetLength = -1;
+  List<Voter>? _cachedDisplayed;
+  List<Voter>? _cachedSource;
+  _ColumnKey? _cachedSortKey;
+  bool? _cachedSortAsc;
+  int _cachedFiltersHash = 0;
 
   final Map<_ColumnKey, Set<String>> _columnFilters = {};
   final Map<_ColumnKey, GlobalKey> _filterKeys = {};
+
+  String _normalizeLookupName(String value) => value.trim();
+
+  Map<String, List<int>> _familyIdsByNameFromLookup() {
+    final lookupState = context.read<LookupCubit>().state;
+    final grouped = <String, List<int>>{};
+
+    if (lookupState is LookupLoaded) {
+      for (final family in lookupState.families) {
+        final familyName = _normalizeLookupName(family.familyName);
+        grouped.putIfAbsent(familyName, () => <int>[]).add(family.id);
+      }
+    } else {
+      final votersState = context.read<VotersCubit>().state;
+      if (votersState is VotersLoaded) {
+        for (final voter in votersState.voters) {
+          if (voter.familyId == null || voter.familyName == null) {
+            continue;
+          }
+          final familyName = _normalizeLookupName(voter.familyName!);
+          grouped.putIfAbsent(familyName, () => <int>[]).add(voter.familyId!);
+        }
+      }
+    }
+
+    for (final ids in grouped.values) {
+      ids.sort();
+    }
+    return grouped;
+  }
 
   @override
   void initState() {
@@ -84,8 +121,13 @@ class _VotersDataTableState extends State<VotersDataTable> {
     final state = context.read<VotersCubit>().state;
     if (state is! VotersLoaded) return;
 
-    final totalDisplayed = _applyFiltersAndSort(state.voters).length;
-    if (_visibleCount >= totalDisplayed) return;
+    final totalDisplayed = _getDisplayedRows(state.voters).length;
+    if (_visibleCount >= totalDisplayed) {
+      if (!state.hasReachedEnd && !state.isLoadingMore) {
+        context.read<VotersCubit>().loadMore();
+      }
+      return;
+    }
 
     setState(() {
       _visibleCount = math.min(
@@ -106,7 +148,7 @@ class _VotersDataTableState extends State<VotersDataTable> {
       case _ColumnKey.grandfather:
         return v.grandfatherName ?? '';
       case _ColumnKey.family:
-        return v.familyName ?? '';
+        return _normalizeLookupName(v.familyName ?? '');
       case _ColumnKey.status:
         return v.status;
     }
@@ -124,6 +166,10 @@ class _VotersDataTableState extends State<VotersDataTable> {
   }
 
   List<Voter> _applyFiltersAndSort(List<Voter> source) {
+    if (_columnFilters.isEmpty && _sortKey == null) {
+      return source;
+    }
+
     Iterable<Voter> result = source;
 
     for (final entry in _columnFilters.entries) {
@@ -146,6 +192,47 @@ class _VotersDataTableState extends State<VotersDataTable> {
     return list;
   }
 
+  int _filtersHash() {
+    final parts = <Object>[];
+    final entries = _columnFilters.entries.toList()
+      ..sort((a, b) => a.key.index.compareTo(b.key.index));
+
+    for (final entry in entries) {
+      parts.add(entry.key.index);
+      final values = entry.value.toList()..sort();
+      parts.addAll(values);
+    }
+
+    return Object.hashAll(parts);
+  }
+
+  void _invalidateDisplayedCache() {
+    _cachedDisplayed = null;
+    _cachedSource = null;
+    _cachedSortKey = null;
+    _cachedSortAsc = null;
+    _cachedFiltersHash = 0;
+  }
+
+  List<Voter> _getDisplayedRows(List<Voter> source) {
+    final filtersHash = _filtersHash();
+    if (_cachedDisplayed != null &&
+        identical(_cachedSource, source) &&
+        _cachedSortKey == _sortKey &&
+        _cachedSortAsc == _sortAsc &&
+        _cachedFiltersHash == filtersHash) {
+      return _cachedDisplayed!;
+    }
+
+    final displayed = _applyFiltersAndSort(source);
+    _cachedDisplayed = displayed;
+    _cachedSource = source;
+    _cachedSortKey = _sortKey;
+    _cachedSortAsc = _sortAsc;
+    _cachedFiltersHash = filtersHash;
+    return displayed;
+  }
+
   void _toggleSort(_ColumnKey key) {
     setState(() {
       if (_sortKey == key) {
@@ -154,6 +241,7 @@ class _VotersDataTableState extends State<VotersDataTable> {
         _sortKey = key;
         _sortAsc = true;
       }
+      _invalidateDisplayedCache();
       _lastDatasetLength = -1;
     });
   }
@@ -178,12 +266,14 @@ class _VotersDataTableState extends State<VotersDataTable> {
           } else {
             _columnFilters[key] = selected;
           }
+          _invalidateDisplayedCache();
           _lastDatasetLength = -1;
         });
       },
       onClear: () {
         setState(() {
           _columnFilters.remove(key);
+          _invalidateDisplayedCache();
           _lastDatasetLength = -1;
         });
       },
@@ -192,10 +282,8 @@ class _VotersDataTableState extends State<VotersDataTable> {
 
   void _openFamilyFilter(_ColumnKey key) async {
     final cubit = context.read<VotersCubit>();
-    final allFamilies = await cubit.getAllUniqueFamilies();
-    if (!mounted) return;
-
-    final allValues = allFamilies.toList();
+    final familyIdsByName = _familyIdsByNameFromLookup();
+    final allValues = familyIdsByName.keys.toList()..sort();
     showExcelFilter<String>(
       context: context,
       triggerKey: _filterKeys[key]!,
@@ -209,6 +297,7 @@ class _VotersDataTableState extends State<VotersDataTable> {
           } else {
             _columnFilters[key] = selected;
           }
+          _invalidateDisplayedCache();
           _lastDatasetLength = -1;
         });
 
@@ -223,19 +312,19 @@ class _VotersDataTableState extends State<VotersDataTable> {
           return;
         }
 
-        final familiesMap = await cubit.getFamiliesMap();
-        if (!mounted) return;
-
         final selectedFamilyIds = <int>[];
         for (final familyName in selected) {
-          final familyId = familiesMap[familyName];
-          if (familyId != null) {
-            selectedFamilyIds.add(familyId);
+          final familyIds = familyIdsByName[familyName];
+          if (familyIds != null) {
+            selectedFamilyIds.addAll(familyIds);
           }
         }
 
         if (selectedFamilyIds.isNotEmpty) {
-          cubit.loadVoters(familyIds: selectedFamilyIds, status: status);
+          cubit.loadVoters(
+            familyIds: selectedFamilyIds.toSet().toList(),
+            status: status,
+          );
         } else {
           cubit.loadVoters(status: status);
         }
@@ -243,6 +332,7 @@ class _VotersDataTableState extends State<VotersDataTable> {
       onClear: () {
         setState(() {
           _columnFilters.remove(key);
+          _invalidateDisplayedCache();
           _lastDatasetLength = -1;
         });
 
@@ -262,6 +352,14 @@ class _VotersDataTableState extends State<VotersDataTable> {
   @override
   Widget build(BuildContext context) {
     return BlocBuilder<VotersCubit, VotersState>(
+      buildWhen: (previous, current) =>
+          previous.runtimeType != current.runtimeType ||
+          (previous is VotersLoaded &&
+              current is VotersLoaded &&
+              (previous.voters != current.voters ||
+                  previous.totalCount != current.totalCount ||
+                  previous.isLoadingMore != current.isLoadingMore ||
+                  previous.hasReachedEnd != current.hasReachedEnd)),
       builder: (context, state) {
         if (state is! VotersLoaded) return const SizedBox.shrink();
         if (state.voters.isEmpty) {
@@ -273,14 +371,21 @@ class _VotersDataTableState extends State<VotersDataTable> {
           );
         }
 
-        final displayed = _applyFiltersAndSort(state.voters);
+        final displayed = _getDisplayedRows(state.voters);
         final hasAnyFilter = _columnFilters.isNotEmpty;
         final datasetLength = displayed.length;
         if (_lastDatasetLength != datasetLength) {
+          final previousLength = _lastDatasetLength;
           _lastDatasetLength = datasetLength;
-          _visibleCount = datasetLength == 0
-              ? 0
-              : math.min(AppConstants.pageSize, datasetLength);
+          if (datasetLength == 0) {
+            _visibleCount = 0;
+          } else if (previousLength < 0) {
+            _visibleCount = math.min(AppConstants.pageSize, datasetLength);
+          } else if (datasetLength < previousLength) {
+            _visibleCount = math.min(_visibleCount, datasetLength);
+          } else if (datasetLength > previousLength) {
+            _visibleCount = datasetLength;
+          }
         }
         final visibleRows = displayed.take(_visibleCount).toList();
 
@@ -303,17 +408,18 @@ class _VotersDataTableState extends State<VotersDataTable> {
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      'عرض ${displayed.length} من ${state.voters.length} ناخب',
+                      '${displayed.length} / ${state.totalCount}',
                       style: const TextStyle(
                         fontSize: 13,
                         color: AppColors.primary,
-                        fontWeight: FontWeight.w600,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                     const Spacer(),
                     InkWell(
                       onTap: () => setState(() {
                         _columnFilters.clear();
+                        _invalidateDisplayedCache();
                         _lastDatasetLength = -1;
                       }),
                       child: const Text(
@@ -346,12 +452,21 @@ class _VotersDataTableState extends State<VotersDataTable> {
               child: Row(
                 children: [
                   Text(
-                    'إجمالي: ${visibleRows.length} / ${displayed.length} ناخب',
+                    '${visibleRows.length} / ${state.totalCount}',
                     style: const TextStyle(
                       fontSize: 13,
                       color: AppColors.textSecondary,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
+                  if (state.isLoadingMore) ...[
+                    const Spacer(),
+                    const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ],
                 ],
               ),
             ),

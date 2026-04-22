@@ -1,5 +1,10 @@
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../../domain/entities/candidate.dart';
+import '../../../domain/entities/electoral_list.dart';
+import '../../../domain/entities/family.dart';
+import '../../../domain/entities/sub_clan.dart';
+import '../../../domain/entities/voting_center.dart';
 import '../../../domain/repositories/lookup_repository.dart';
 import '../../../domain/usecases/lookup/lookup_crud_usecases.dart';
 import '../../../domain/usecases/lookup/import_lists_candidates_usecase.dart';
@@ -45,6 +50,42 @@ class LookupCubit extends Cubit<LookupState> {
         _deleteCandidate = deleteCandidate,
         _importListsCandidates = importListsCandidates,
         super(const LookupInitial());
+
+  List<Family> _sortedFamilies(List<Family> families) {
+    final sorted = List<Family>.from(families);
+    sorted.sort((a, b) => a.familyName.compareTo(b.familyName));
+    return sorted;
+  }
+
+  List<SubClan> _sortedSubClans(List<SubClan> subClans) {
+    final sorted = List<SubClan>.from(subClans);
+    sorted.sort((a, b) {
+      final familyCompare = (a.familyName ?? '').compareTo(b.familyName ?? '');
+      if (familyCompare != 0) {
+        return familyCompare;
+      }
+      return a.subName.compareTo(b.subName);
+    });
+    return sorted;
+  }
+
+  List<VotingCenter> _sortedCenters(List<VotingCenter> centers) {
+    final sorted = List<VotingCenter>.from(centers);
+    sorted.sort((a, b) => a.centerName.compareTo(b.centerName));
+    return sorted;
+  }
+
+  List<ElectoralList> _sortedLists(List<ElectoralList> lists) {
+    final sorted = List<ElectoralList>.from(lists);
+    sorted.sort((a, b) => a.listName.compareTo(b.listName));
+    return sorted;
+  }
+
+  List<Candidate> _sortedCandidates(List<Candidate> candidates) {
+    final sorted = List<Candidate>.from(candidates);
+    sorted.sort((a, b) => a.candidateName.compareTo(b.candidateName));
+    return sorted;
+  }
 
   Future<void> loadAll() async {
     emit(const LookupLoading());
@@ -103,7 +144,19 @@ class LookupCubit extends Cubit<LookupState> {
     final result = await _addFamily(name);
     result.fold(
       (failure) => emit(LookupError(failure.message)),
-      (_) => loadAll(),
+      (family) {
+        final currentState = state;
+        if (currentState is! LookupLoaded) {
+          loadAll();
+          return;
+        }
+
+        emit(
+          currentState.copyWith(
+            families: _sortedFamilies([...currentState.families, family]),
+          ),
+        );
+      },
     );
   }
 
@@ -111,7 +164,22 @@ class LookupCubit extends Cubit<LookupState> {
     final result = await _deleteFamily(id);
     result.fold(
       (failure) => emit(LookupError(failure.message)),
-      (_) => loadAll(),
+      (_) {
+        final currentState = state;
+        if (currentState is! LookupLoaded) {
+          loadAll();
+          return;
+        }
+
+        emit(
+          currentState.copyWith(
+            families: currentState.families.where((item) => item.id != id).toList(),
+            subClans: currentState.subClans
+                .where((item) => item.familyId != id)
+                .toList(),
+          ),
+        );
+      },
     );
   }
 
@@ -119,7 +187,19 @@ class LookupCubit extends Cubit<LookupState> {
     final result = await _addSubClan(familyId, name);
     result.fold(
       (failure) => emit(LookupError(failure.message)),
-      (_) => loadAll(),
+      (subClan) {
+        final currentState = state;
+        if (currentState is! LookupLoaded) {
+          loadAll();
+          return;
+        }
+
+        emit(
+          currentState.copyWith(
+            subClans: _sortedSubClans([...currentState.subClans, subClan]),
+          ),
+        );
+      },
     );
   }
 
@@ -127,7 +207,21 @@ class LookupCubit extends Cubit<LookupState> {
     final result = await _deleteSubClan(id);
     result.fold(
       (failure) => emit(LookupError(failure.message)),
-      (_) => loadAll(),
+      (_) {
+        final currentState = state;
+        if (currentState is! LookupLoaded) {
+          loadAll();
+          return;
+        }
+
+        emit(
+          currentState.copyWith(
+            subClans: currentState.subClans
+                .where((item) => item.id != id)
+                .toList(),
+          ),
+        );
+      },
     );
   }
 
@@ -135,7 +229,19 @@ class LookupCubit extends Cubit<LookupState> {
     final result = await _addVotingCenter(name);
     result.fold(
       (failure) => emit(LookupError(failure.message)),
-      (_) => loadAll(),
+      (center) {
+        final currentState = state;
+        if (currentState is! LookupLoaded) {
+          loadAll();
+          return;
+        }
+
+        emit(
+          currentState.copyWith(
+            centers: _sortedCenters([...currentState.centers, center]),
+          ),
+        );
+      },
     );
   }
 
@@ -143,7 +249,19 @@ class LookupCubit extends Cubit<LookupState> {
     final result = await _deleteVotingCenter(id);
     result.fold(
       (failure) => emit(LookupError(failure.message)),
-      (_) => loadAll(),
+      (_) {
+        final currentState = state;
+        if (currentState is! LookupLoaded) {
+          loadAll();
+          return;
+        }
+
+        emit(
+          currentState.copyWith(
+            centers: currentState.centers.where((item) => item.id != id).toList(),
+          ),
+        );
+      },
     );
   }
 
@@ -151,7 +269,22 @@ class LookupCubit extends Cubit<LookupState> {
     final result = await _addElectoralList(name);
     result.fold(
       (failure) => emit(LookupError(failure.message)),
-      (_) => loadAll(),
+      (electoralList) {
+        final currentState = state;
+        if (currentState is! LookupLoaded) {
+          loadAll();
+          return;
+        }
+
+        emit(
+          currentState.copyWith(
+            electoralLists: _sortedLists([
+              ...currentState.electoralLists,
+              electoralList,
+            ]),
+          ),
+        );
+      },
     );
   }
 
@@ -159,7 +292,24 @@ class LookupCubit extends Cubit<LookupState> {
     final result = await _deleteElectoralList(id);
     result.fold(
       (failure) => emit(LookupError(failure.message)),
-      (_) => loadAll(),
+      (_) {
+        final currentState = state;
+        if (currentState is! LookupLoaded) {
+          loadAll();
+          return;
+        }
+
+        emit(
+          currentState.copyWith(
+            electoralLists: currentState.electoralLists
+                .where((item) => item.id != id)
+                .toList(),
+            candidates: currentState.candidates
+                .where((item) => item.listId != id)
+                .toList(),
+          ),
+        );
+      },
     );
   }
 
@@ -167,7 +317,19 @@ class LookupCubit extends Cubit<LookupState> {
     final result = await _addCandidate(name, listId: listId);
     result.fold(
       (failure) => emit(LookupError(failure.message)),
-      (_) => loadAll(),
+      (candidate) {
+        final currentState = state;
+        if (currentState is! LookupLoaded) {
+          loadAll();
+          return;
+        }
+
+        emit(
+          currentState.copyWith(
+            candidates: _sortedCandidates([...currentState.candidates, candidate]),
+          ),
+        );
+      },
     );
   }
 
@@ -175,7 +337,21 @@ class LookupCubit extends Cubit<LookupState> {
     final result = await _deleteCandidate(id);
     result.fold(
       (failure) => emit(LookupError(failure.message)),
-      (_) => loadAll(),
+      (_) {
+        final currentState = state;
+        if (currentState is! LookupLoaded) {
+          loadAll();
+          return;
+        }
+
+        emit(
+          currentState.copyWith(
+            candidates: currentState.candidates
+                .where((item) => item.id != id)
+                .toList(),
+          ),
+        );
+      },
     );
   }
 

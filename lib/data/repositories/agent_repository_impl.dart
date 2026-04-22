@@ -39,6 +39,7 @@ class AgentRepositoryImpl implements AgentRepository {
     required String username,
     required String password,
     bool isAdmin = false,
+    bool canCreateAgents = false,
   }) async {
     if (!await _connectivity.hasInternet) {
       return const Left(ServerFailure(message: 'تتطلب هذه العملية اتصالاً بالانترنت'));
@@ -49,6 +50,7 @@ class AgentRepositoryImpl implements AgentRepository {
         username: username,
         password: password,
         isAdmin: isAdmin,
+        canCreateAgents: canCreateAgents,
       );
       return Right(model.toEntity());
     } on ServerException catch (e) {
@@ -99,6 +101,7 @@ class AgentRepositoryImpl implements AgentRepository {
     required String agentId,
     int? familyId,
     int? subClanId,
+    bool isManager = false,
   }) async {
     if (!await _connectivity.hasInternet) {
       return const Left(ServerFailure(message: 'تتطلب هذه العملية اتصالاً بالانترنت'));
@@ -108,6 +111,7 @@ class AgentRepositoryImpl implements AgentRepository {
         agentId: agentId,
         familyId: familyId,
         subClanId: subClanId,
+        isManager: isManager,
       );
       return Right(perm);
     } on ServerException catch (e) {
@@ -124,6 +128,21 @@ class AgentRepositoryImpl implements AgentRepository {
     }
     try {
       await _remoteDatasource.removeAgentPermission(permissionId);
+      return const Right(null);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(message: e.message));
+    } catch (e) {
+      return Left(ServerFailure(message: 'خطأ غير متوقع: $e'));
+    }
+  }
+
+  @override
+  Future<Either<Failure, void>> deleteAgent(String agentId) async {
+    if (!await _connectivity.hasInternet) {
+      return const Left(ServerFailure(message: 'تتطلب هذه العملية اتصالاً بالانترنت'));
+    }
+    try {
+      await _remoteDatasource.deleteAgent(agentId);
       return const Right(null);
     } on ServerException catch (e) {
       return Left(ServerFailure(message: e.message));

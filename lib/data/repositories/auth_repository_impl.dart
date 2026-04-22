@@ -2,15 +2,37 @@ import 'package:dartz/dartz.dart';
 
 import '../../../core/errors/exceptions.dart';
 import '../../../core/errors/failures.dart';
+import '../../../data/datasources/remote/supabase_agent_datasource.dart';
+import '../../../data/datasources/remote/supabase_lookup_datasource.dart';
+import '../../../data/datasources/remote/supabase_voter_datasource.dart';
+import '../../../data/sync/sync_queue.dart';
 import '../../../domain/entities/agent.dart';
 import '../../../domain/repositories/auth_repository.dart';
+import '../../../domain/repositories/lookup_repository.dart';
 import '../datasources/remote/supabase_auth_datasource.dart';
 
 /// Auth repository implementation.
 class AuthRepositoryImpl implements AuthRepository {
   final SupabaseAuthDatasource _remoteDatasource;
+  final LookupRepository _lookupRepository;
+  final SyncQueue _syncQueue;
+  final SupabaseVoterDatasource _voterDatasource;
+  final SupabaseLookupDatasource _lookupDatasource;
+  final SupabaseAgentDatasource _agentDatasource;
 
-  AuthRepositoryImpl(this._remoteDatasource);
+  AuthRepositoryImpl({
+    required SupabaseAuthDatasource remoteDatasource,
+    required LookupRepository lookupRepository,
+    required SyncQueue syncQueue,
+    required SupabaseVoterDatasource voterDatasource,
+    required SupabaseLookupDatasource lookupDatasource,
+    required SupabaseAgentDatasource agentDatasource,
+  }) : _remoteDatasource = remoteDatasource,
+       _lookupRepository = lookupRepository,
+       _syncQueue = syncQueue,
+       _voterDatasource = voterDatasource,
+       _lookupDatasource = lookupDatasource,
+       _agentDatasource = agentDatasource;
 
   @override
   Future<Either<Failure, Agent>> signIn({
@@ -35,6 +57,12 @@ class AuthRepositoryImpl implements AuthRepository {
   @override
   Future<Either<Failure, void>> signOut() async {
     try {
+      await _lookupRepository.clearCache();
+      await _syncQueue.clear();
+      _voterDatasource.invalidatePermissionsCache();
+      _lookupDatasource.invalidatePermissionsCache();
+      _voterDatasource.disposeRealtime();
+      _agentDatasource.disposeCurrentUserPermissionRealtime();
       await _remoteDatasource.signOut();
       return const Right(null);
     } catch (e) {

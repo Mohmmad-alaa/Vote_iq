@@ -38,6 +38,7 @@ Deno.serve(async (req) => {
     const subClanId = payload.sub_clan_id == null
       ? null
       : Number(payload.sub_clan_id);
+    const isManager = payload.is_manager === true;
 
     if (!accessToken || !agentId) {
       return jsonResponse({ error: "Missing required fields" }, 400);
@@ -60,7 +61,7 @@ Deno.serve(async (req) => {
 
     const { data: callerAgent, error: callerError } = await adminClient
       .from("agents")
-      .select("id, role, is_active")
+      .select("id, role, is_active, can_create_agents")
       .eq("id", authData.user.id)
       .maybeSingle();
 
@@ -68,11 +69,23 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: callerError.message }, 403);
     }
 
+    const isCallerAdmin = callerAgent?.role === "admin";
+    const canCallerCreateAgents = callerAgent?.can_create_agents === true;
+
     if (
-      callerAgent == null || callerAgent["role"] !== "admin" ||
-      callerAgent["is_active"] != true
+      callerAgent == null || callerAgent["is_active"] != true ||
+      (!isCallerAdmin && !canCallerCreateAgents)
     ) {
       return jsonResponse({ error: "Forbidden" }, 403);
+    }
+
+    if (!isCallerAdmin) {
+      if (isManager) {
+        return jsonResponse({ error: "لا تملك الصلاحية لمنح امتيازات مسؤول" }, 403);
+      }
+      if (familyId == null && subClanId == null) {
+        return jsonResponse({ error: "لا تملك الصلاحية لمنح وصول شامل" }, 403);
+      }
     }
 
     if (familyId == null && subClanId != null) {
@@ -135,8 +148,9 @@ Deno.serve(async (req) => {
         agent_id: agentId,
         family_id: familyId,
         sub_clan_id: subClanId,
+        is_manager: isManager,
       })
-      .select("id, agent_id, family_id, sub_clan_id")
+      .select("id, agent_id, family_id, sub_clan_id, is_manager")
       .single();
 
     if (insertError) {

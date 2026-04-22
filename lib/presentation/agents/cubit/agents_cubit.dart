@@ -11,6 +11,7 @@ class AgentsCubit extends Cubit<AgentsState> {
   final GetAgentsUseCase _getAgents;
   final CreateAgentUseCase _createAgent;
   final UpdateAgentStatusUseCase _updateAgentStatus;
+  final DeleteAgentUseCase _deleteAgent;
   final GetAgentPermissionsUseCase _getPermissions;
   final AddAgentPermissionUseCase _addPermission;
   final RemoveAgentPermissionUseCase _removePermission;
@@ -19,12 +20,14 @@ class AgentsCubit extends Cubit<AgentsState> {
     required GetAgentsUseCase getAgents,
     required CreateAgentUseCase createAgent,
     required UpdateAgentStatusUseCase updateAgentStatus,
+    required DeleteAgentUseCase deleteAgent,
     required GetAgentPermissionsUseCase getPermissions,
     required AddAgentPermissionUseCase addPermission,
     required RemoveAgentPermissionUseCase removePermission,
   })  : _getAgents = getAgents,
         _createAgent = createAgent,
         _updateAgentStatus = updateAgentStatus,
+        _deleteAgent = deleteAgent,
         _getPermissions = getPermissions,
         _addPermission = addPermission,
         _removePermission = removePermission,
@@ -44,6 +47,7 @@ class AgentsCubit extends Cubit<AgentsState> {
     required String username,
     required String password,
     required bool isAdmin,
+    bool canCreateAgents = false,
   }) async {
     final currentState = state;
     if (currentState is! AgentsLoaded) return;
@@ -53,6 +57,7 @@ class AgentsCubit extends Cubit<AgentsState> {
       username: username,
       password: password,
       isAdmin: isAdmin,
+      canCreateAgents: canCreateAgents,
     );
 
     result.fold(
@@ -78,6 +83,32 @@ class AgentsCubit extends Cubit<AgentsState> {
           return a.id == agentId ? updatedAgent : a;
         }).toList();
         emit(currentState.copyWith(agents: newAgents));
+      },
+    );
+  }
+
+  Future<void> deleteAgent(String agentId) async {
+    final currentState = state;
+    if (currentState is! AgentsLoaded) return;
+
+    final result = await _deleteAgent(agentId);
+
+    result.fold(
+      (failure) => emit(currentState.copyWith(
+        actionError: failure.message,
+        clearActionMessage: true,
+      )),
+      (_) {
+        final newAgents = currentState.agents.where((a) => a.id != agentId).toList();
+        final newPerms = Map<String, List<AgentPermission>>.from(currentState.agentPermissions);
+        newPerms.remove(agentId);
+
+        emit(currentState.copyWith(
+          agents: newAgents,
+          agentPermissions: newPerms,
+          actionMessage: 'تم حذف الوكيل بنجاح',
+          clearActionError: true,
+        ));
       },
     );
   }
@@ -138,6 +169,7 @@ class AgentsCubit extends Cubit<AgentsState> {
     required String agentId,
     int? familyId,
     int? subClanId,
+    bool isManager = false,
   }) async {
     final currentState = state;
     if (currentState is! AgentsLoaded) return;
@@ -149,11 +181,12 @@ class AgentsCubit extends Cubit<AgentsState> {
         'agentId': agentId,
         'familyId': familyId,
         'subClanId': subClanId,
+        'isManager': isManager,
       },
     );
     debugPrint(
       '[AgentsCubit] addPermission start: '
-      'agentId=$agentId, familyId=$familyId, subClanId=$subClanId',
+      'agentId=$agentId, familyId=$familyId, subClanId=$subClanId, isManager=$isManager',
     );
 
     emit(currentState.copyWith(
@@ -166,6 +199,7 @@ class AgentsCubit extends Cubit<AgentsState> {
       agentId: agentId,
       familyId: familyId,
       subClanId: subClanId,
+      isManager: isManager,
     );
 
     result.fold(

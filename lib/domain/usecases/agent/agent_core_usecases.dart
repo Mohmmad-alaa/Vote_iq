@@ -21,12 +21,14 @@ class CreateAgentUseCase {
     required String username,
     required String password,
     bool isAdmin = false,
+    bool canCreateAgents = false,
   }) async {
     return await repository.createAgent(
       fullName: fullName,
       username: username,
       password: password,
       isAdmin: isAdmin,
+      canCreateAgents: canCreateAgents,
     );
   }
 }
@@ -43,5 +45,14 @@ class UpdateAgentStatusUseCase {
       agentId: agentId,
       isActive: isActive,
     );
+  }
+}
+
+class DeleteAgentUseCase {
+  final AgentRepository repository;
+  DeleteAgentUseCase(this.repository);
+
+  Future<Either<Failure, void>> call(String agentId) async {
+    return await repository.deleteAgent(agentId);
   }
 }

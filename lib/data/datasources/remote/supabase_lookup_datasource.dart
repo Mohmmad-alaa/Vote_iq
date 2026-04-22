@@ -16,6 +16,9 @@ class SupabaseLookupDatasource {
   List<int>? _cachedSubClanIds;
   bool _isAdmin = false;
   bool _hasGlobalAccess = false;
+  String? _permissionsLoadedForUserId;
+  DateTime? _permissionsCacheTime;
+  static const Duration _permissionsTTL = Duration(minutes: 10);
 
   SupabaseLookupDatasource(this._client);
 
@@ -26,11 +29,47 @@ class SupabaseLookupDatasource {
     _cachedSubClanIds = null;
     _isAdmin = false;
     _hasGlobalAccess = false;
+    _permissionsCacheTime = null;
+    _permissionsLoadedForUserId = null;
+  }
+
+  /// Only reload permissions if cache has expired or is empty.
+  Future<void> _ensurePermissionsLoaded() async {
+    final currentUserId = _client.auth.currentUser?.id;
+    if (currentUserId == null) {
+      invalidatePermissionsCache();
+      return;
+    }
+
+    if (_permissionsLoadedForUserId != null &&
+        _permissionsLoadedForUserId != currentUserId) {
+      invalidatePermissionsCache();
+    }
+
+    if (_permissionsCacheTime != null &&
+        DateTime.now().difference(_permissionsCacheTime!) < _permissionsTTL) {
+      return;
+    }
+    await _loadPermissionsCache();
+    _permissionsCacheTime = DateTime.now();
   }
 
   Future<void> _loadPermissionsCache() async {
     final user = _client.auth.currentUser;
-    if (user == null) return;
+    if (user == null) {
+      invalidatePermissionsCache();
+      return;
+    }
+
+    if (_permissionsLoadedForUserId != null &&
+        _permissionsLoadedForUserId != user.id) {
+      debugPrint(
+        '[SupabaseLookupDatasource] auth user changed from '
+        '$_permissionsLoadedForUserId to ${user.id}, resetting permissions cache',
+      );
+      invalidatePermissionsCache();
+    }
+    _permissionsLoadedForUserId = user.id;
 
     final agentData = await _client
         .from('agents')
@@ -91,7 +130,7 @@ class SupabaseLookupDatasource {
 
   Future<List<FamilyModel>> getFamilies() async {
     try {
-      await _loadPermissionsCache();
+      await _ensurePermissionsLoaded();
 
       var query = _client.from('families').select();
       if (!_isAdmin && !_hasGlobalAccess) {
@@ -114,7 +153,7 @@ class SupabaseLookupDatasource {
 
   Future<List<SubClanModel>> getSubClans({int? familyId}) async {
     try {
-      await _loadPermissionsCache();
+      await _ensurePermissionsLoaded();
 
       var query = _client.from('sub_clans').select('*, families(family_name)');
 

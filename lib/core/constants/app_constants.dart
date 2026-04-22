@@ -35,7 +35,7 @@ class AppConstants {
   static const int pageSize = 50;
 
   /// Search debounce delay in milliseconds.
-  static const int searchDebounceMs = 300;
+  static const int searchDebounceMs = 150;
 
   // ── Voter Status Values ──
   static const String statusNotVoted = 'لم يصوت';

@@ -84,6 +84,32 @@ class LocalVoterDatasource {
     }
   }
 
+  Future<int> getCachedVotersCount({
+    List<int>? familyIds,
+    int? subClanId,
+    int? centerId,
+    String? status,
+    String? searchQuery,
+  }) async {
+    try {
+      final cache = await _ensureMemoryCache();
+      final params = _ProcessParams(
+        rawValues: cache.values.toList(growable: false),
+        familyIds: familyIds,
+        subClanId: subClanId,
+        centerId: centerId,
+        status: status,
+        searchQuery: searchQuery,
+        page: 0,
+        pageSize: 0,
+      );
+
+      return compute(_countVotersInIsolate, params);
+    } catch (e) {
+      throw CacheException(message: 'خطأ في عد الناخبين من الذاكرة المحلية: $e');
+    }
+  }
+
   /// Update a single voter in the cache.
   Future<void> updateCachedVoter(VoterModel voter) async {
     try {
@@ -156,7 +182,7 @@ class LocalVoterDatasource {
   }) async {
     try {
       final cache = await _ensureMemoryCache();
-      final allowed = allowedIds == null ? null : allowedIds.toSet();
+      final allowed = allowedIds?.toSet();
       final grouped = <int, Map<String, int>>{};
 
       for (final voter in cache.values) {
@@ -274,48 +300,7 @@ class _ProcessParams {
 }
 
 List<VoterModel> _processVotersInIsolate(_ProcessParams params) {
-  var rows = params.rawValues
-      .whereType<Map>()
-      .map((v) => Map<String, dynamic>.from(v))
-      .toList();
-
-  if (params.familyIds != null && params.familyIds!.isNotEmpty) {
-    rows = rows
-        .where(
-          (v) =>
-              v['family_id'] != null &&
-              params.familyIds!.contains(v['family_id']),
-        )
-        .toList();
-  }
-  if (params.subClanId != null) {
-    rows = rows.where((v) => v['sub_clan_id'] == params.subClanId).toList();
-  }
-  if (params.centerId != null) {
-    rows = rows.where((v) => v['center_id'] == params.centerId).toList();
-  }
-  if (params.status != null) {
-    rows = rows.where((v) => v['status'] == params.status).toList();
-  }
-  if (params.searchQuery != null && params.searchQuery!.isNotEmpty) {
-    final cleanQuery = params.searchQuery!
-        .replaceAll(RegExp(r'[^\w\s\u0600-\u06FF]'), '')
-        .trim()
-        .toLowerCase();
-
-    if (cleanQuery.isNotEmpty) {
-      final terms = cleanQuery
-          .split(RegExp(r'\s+'))
-          .where((t) => t.isNotEmpty)
-          .toList(growable: false);
-
-      rows = rows.where((v) {
-        final searchText =
-            (v['search_blob'] as String? ?? _buildSearchBlob(v)).toLowerCase();
-        return terms.every((term) => searchText.contains(term));
-      }).toList();
-    }
-  }
+  final rows = _filterRows(params);
 
   rows.sort(
     (a, b) => (a['voter_symbol'] as String).compareTo(
@@ -335,6 +320,79 @@ List<VoterModel> _processVotersInIsolate(_ProcessParams params) {
       .take(params.pageSize)
       .map(VoterModel.fromHiveMap)
       .toList(growable: false);
+}
+
+int _countVotersInIsolate(_ProcessParams params) {
+  return _filterRows(params).length;
+}
+
+List<Map<String, dynamic>> _filterRows(_ProcessParams params) {
+  final List<Map<String, dynamic>> allRows;
+  // Avoid expensive Map.from — data is already cast<String, dynamic> in _ensureMemoryCache
+  if (params.rawValues is List<Map<String, dynamic>>) {
+    allRows = params.rawValues as List<Map<String, dynamic>>;
+  } else {
+    allRows = params.rawValues
+        .whereType<Map>()
+        .map((v) => v.cast<String, dynamic>())
+        .toList(growable: false);
+  }
+
+  // Fast path: no filters at all
+  final hasFamily = params.familyIds != null && params.familyIds!.isNotEmpty;
+  final hasSubClan = params.subClanId != null;
+  final hasCenter = params.centerId != null;
+  final hasStatus = params.status != null;
+
+  String? cleanQuery;
+  List<String>? terms;
+  if (params.searchQuery != null && params.searchQuery!.isNotEmpty) {
+    cleanQuery = params.searchQuery!
+        .replaceAll(RegExp(r'[^\w\s\u0600-\u06FF]'), '')
+        .trim()
+        .toLowerCase();
+    if (cleanQuery.isNotEmpty) {
+      terms = cleanQuery
+          .split(RegExp(r'\s+'))
+          .where((t) => t.isNotEmpty)
+          .toList(growable: false);
+      if (terms.isEmpty) terms = null;
+    }
+  }
+
+  final hasSearch = terms != null;
+
+  if (!hasFamily && !hasSubClan && !hasCenter && !hasStatus && !hasSearch) {
+    return List<Map<String, dynamic>>.from(allRows);
+  }
+
+  // Pre-compute family set for O(1) lookup
+  final Set<int>? familySet = hasFamily ? params.familyIds!.toSet() : null;
+
+  final rows = <Map<String, dynamic>>[];
+  for (final v in allRows) {
+    if (hasFamily && (v['family_id'] == null || !familySet!.contains(v['family_id']))) {
+      continue;
+    }
+    if (hasSubClan && v['sub_clan_id'] != params.subClanId) continue;
+    if (hasCenter && v['center_id'] != params.centerId) continue;
+    if (hasStatus && v['status'] != params.status) continue;
+    if (hasSearch) {
+      final searchText =
+          (v['search_blob'] as String? ?? _buildSearchBlob(v)).toLowerCase();
+      bool match = true;
+      for (final term in terms) {
+        if (!searchText.contains(term)) {
+          match = false;
+          break;
+        }
+      }
+      if (!match) continue;
+    }
+    rows.add(v);
+  }
+
+  return rows;
 }
 
 String _buildSearchBlob(Map<dynamic, dynamic> map) {

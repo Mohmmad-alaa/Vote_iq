@@ -17,9 +17,14 @@ class SupabaseVoterDatasource {
   List<int>? _cachedFamilyScopeIds;
   List<int>? _cachedVisibleFamilyIds;
   List<int>? _cachedSubClanIds;
+  List<int>? _managerFamilyIds;
+  List<int>? _managerSubClanIds;
   bool _isAdmin = false;
+  String? _agentUsername;
   bool _hasGlobalAccess = false;
+  bool _hasGlobalManagerAccess = false;
   DateTime? _permissionsCacheTime;
+  String? _permissionsLoadedForUserId;
   static const Duration _permissionsTTL = Duration(minutes: 10);
 
   SupabaseVoterDatasource(this._client);
@@ -29,13 +34,74 @@ class SupabaseVoterDatasource {
     _cachedFamilyScopeIds = null;
     _cachedVisibleFamilyIds = null;
     _cachedSubClanIds = null;
+    _managerFamilyIds = null;
+    _managerSubClanIds = null;
     _isAdmin = false;
+    _agentUsername = null;
     _hasGlobalAccess = false;
+    _hasGlobalManagerAccess = false;
     _permissionsCacheTime = null;
+    _permissionsLoadedForUserId = null;
+  }
+
+  bool get isAnyManager => 
+      _isAdmin || 
+      _hasGlobalManagerAccess || 
+      (_managerFamilyIds?.isNotEmpty ?? false) || 
+      (_managerSubClanIds?.isNotEmpty ?? false);
+
+  /// Asynchronously checks if the agent is a manager, ensuring permissions are loaded first.
+  Future<bool> checkIsAnyManager() async {
+    await _ensurePermissionsLoaded();
+    return isAnyManager;
+  }
+
+  String _serializeScopeIds(List<int>? ids) {
+    if (ids == null || ids.isEmpty) {
+      return '';
+    }
+
+    final sorted = List<int>.from(ids)..sort();
+    return sorted.join(',');
+  }
+
+  Future<String> getPermissionScopeCacheKey() async {
+    await _ensurePermissionsLoaded();
+
+    if (_isAdmin) {
+      return 'admin';
+    }
+
+    if (_hasGlobalAccess) {
+      return 'global:${_hasGlobalManagerAccess ? 1 : 0}';
+    }
+
+    return 'restricted:'
+        'f=${_serializeScopeIds(_cachedFamilyScopeIds)};'
+        'vf=${_serializeScopeIds(_cachedVisibleFamilyIds)};'
+        's=${_serializeScopeIds(_cachedSubClanIds)};'
+        'mf=${_serializeScopeIds(_managerFamilyIds)};'
+        'ms=${_serializeScopeIds(_managerSubClanIds)};'
+        'gm=${_hasGlobalManagerAccess ? 1 : 0}';
   }
 
   /// Only reload permissions if cache has expired or is empty.
   Future<void> _ensurePermissionsLoaded() async {
+    final currentUserId = _client.auth.currentUser?.id;
+    if (currentUserId == null) {
+      invalidatePermissionsCache();
+      return;
+    }
+
+    if (_permissionsLoadedForUserId != null &&
+        _permissionsLoadedForUserId != currentUserId) {
+      debugPrint(
+        '[SupabaseVoterDatasource] auth user changed from '
+        '$_permissionsLoadedForUserId to $currentUserId, resetting permissions cache',
+      );
+      invalidatePermissionsCache();
+    }
+
     if (_permissionsCacheTime != null &&
         DateTime.now().difference(_permissionsCacheTime!) < _permissionsTTL) {
       return;
@@ -47,30 +113,37 @@ class SupabaseVoterDatasource {
   Future<void> _loadPermissionsCache() async {
     final user = _client.auth.currentUser;
     if (user == null) return;
+    _permissionsLoadedForUserId = user.id;
 
     final agentData = await _client
         .from('agents')
-        .select('role')
+        .select('role, username') // Included username to enforce super-admin restrictions
         .eq('id', user.id)
         .maybeSingle();
     if (agentData == null) return;
     _isAdmin = agentData['role'] == 'admin';
+    _agentUsername = agentData['username'] as String?;
     var hasGlobalAccess = false;
+    var hasGlobalManagerAccess = false;
     final familyScopeIds = <int>[];
     final visibleFamilyIds = <int>[];
     final subClanIds = <int>[];
+    final managerFamilyIds = <int>[];
+    final managerSubClanIds = <int>[];
     if (_isAdmin) return;
 
     final perms = await _client
         .from('agent_permissions')
-        .select('family_id, sub_clan_id')
+        .select('family_id, sub_clan_id, is_manager')
         .eq('agent_id', user.id);
     for (final p in (perms as List)) {
       final familyId = p['family_id'] as int?;
       final subClanId = p['sub_clan_id'] as int?;
+      final isManager = p['is_manager'] as bool? ?? false;
 
       if (familyId == null && subClanId == null) {
         hasGlobalAccess = true;
+        if (isManager) hasGlobalManagerAccess = true;
         continue;
       }
 
@@ -85,28 +158,42 @@ class SupabaseVoterDatasource {
       if (subClanId != null) {
         subClanIds.add(subClanId);
       }
+
+      if (isManager) {
+        if (familyId != null && subClanId == null) managerFamilyIds.add(familyId);
+        if (subClanId != null) managerSubClanIds.add(subClanId);
+      }
     }
 
     _hasGlobalAccess = hasGlobalAccess;
+    _hasGlobalManagerAccess = hasGlobalManagerAccess;
     _cachedFamilyScopeIds = familyScopeIds.toSet().toList(growable: false);
     _cachedVisibleFamilyIds = visibleFamilyIds.toSet().toList(growable: false);
     _cachedSubClanIds = subClanIds.toSet().toList(growable: false);
+    _managerFamilyIds = managerFamilyIds.toSet().toList(growable: false);
+    _managerSubClanIds = managerSubClanIds.toSet().toList(growable: false);
     debugPrint(
       '[SupabaseVoterDatasource] permissions loaded: '
       'isAdmin=$_isAdmin, hasGlobalAccess=$_hasGlobalAccess, '
       'familyScopeIds=$_cachedFamilyScopeIds, '
       'visibleFamilyIds=$_cachedVisibleFamilyIds, '
-      'subClanIds=$_cachedSubClanIds',
+      'subClanIds=$_cachedSubClanIds, '
+      'isAnyManager=$isAnyManager',
     );
   }
 
-  dynamic _applyAgentPermissionsFilter(dynamic query) {
+  dynamic _applyAgentPermissionsFilter(
+    dynamic query, {
+    bool includeManageableUnassigned = false,
+  }) {
     if (_isAdmin || _hasGlobalAccess) return query;
     if (_cachedFamilyScopeIds == null || _cachedSubClanIds == null) {
       return query.eq('voter_symbol', 'NO_PERMISSION_FALLBACK');
     }
 
-    if (_cachedFamilyScopeIds!.isEmpty && _cachedSubClanIds!.isEmpty) {
+    if (_cachedFamilyScopeIds!.isEmpty &&
+        _cachedSubClanIds!.isEmpty &&
+        (!includeManageableUnassigned || !isAnyManager)) {
       return query.eq('voter_symbol', 'NO_PERMISSION_FALLBACK');
     }
 
@@ -116,6 +203,9 @@ class SupabaseVoterDatasource {
     }
     if (_cachedSubClanIds!.isNotEmpty) {
       orConditions.add('sub_clan_id.in.(${_cachedSubClanIds!.join(',')})');
+    }
+    if (includeManageableUnassigned && isAnyManager) {
+      orConditions.add('sub_clan_id.is.null');
     }
 
     return query.or(orConditions.join(','));
@@ -130,6 +220,53 @@ class SupabaseVoterDatasource {
 
   String _sanitizeSearchQuery(String value) {
     return value.replaceAll(RegExp(r'[^\w\s\u0600-\u06FF]'), '').trim();
+  }
+
+  String _extractNestedText(dynamic source, String key) {
+    if (source is Map && source[key] is String) {
+      return source[key] as String;
+    }
+    return '';
+  }
+
+  String _buildSearchText(Map<String, dynamic> row) {
+    final candidate = row['candidates'];
+    final candidateList = candidate is Map ? candidate['electoral_lists'] : null;
+
+    return [
+      row['voter_symbol'],
+      row['first_name'],
+      row['father_name'],
+      row['grandfather_name'],
+      _extractNestedText(row['families'], 'family_name'),
+      _extractNestedText(row['sub_clans'], 'sub_name'),
+      _extractNestedText(row['voting_centers'], 'center_name'),
+      _extractNestedText(row['electoral_lists'], 'list_name'),
+      _extractNestedText(candidate, 'candidate_name'),
+      _extractNestedText(candidateList, 'list_name'),
+    ].whereType<String>()
+        .join(' ')
+        .replaceAll(RegExp(r'[^\w\s\u0600-\u06FF]'), '')
+        .trim()
+        .toLowerCase();
+  }
+
+  bool _matchesSearchQuery(Map<String, dynamic> row, String queryText) {
+    final normalizedQuery = _sanitizeSearchQuery(queryText).toLowerCase();
+    if (normalizedQuery.isEmpty) {
+      return true;
+    }
+
+    final terms = normalizedQuery
+        .split(RegExp(r'\s+'))
+        .where((term) => term.isNotEmpty)
+        .toList(growable: false);
+    if (terms.isEmpty) {
+      return true;
+    }
+
+    final searchText = _buildSearchText(row);
+    return terms.every(searchText.contains);
   }
 
   String _escapeOrValue(String value) {
@@ -155,6 +292,24 @@ class SupabaseVoterDatasource {
       filtered = filtered.eq('status', filter.status!);
     }
     return filtered;
+  }
+
+  Map<int, int> _parseCountMap(dynamic raw) {
+    if (raw is! Map) {
+      return <int, int>{};
+    }
+
+    final parsed = <int, int>{};
+    raw.forEach((key, value) {
+      final parsedKey = int.tryParse(key.toString());
+      final parsedValue = value is int
+          ? value
+          : int.tryParse(value.toString());
+      if (parsedKey != null && parsedValue != null) {
+        parsed[parsedKey] = parsedValue;
+      }
+    });
+    return parsed;
   }
 
   Future<List<Map<String, dynamic>>> _fetchPagedRows(
@@ -187,8 +342,39 @@ class SupabaseVoterDatasource {
     return allRows;
   }
 
+  Future<int> getVotersCount(VoterFilter filter) async {
+    try {
+      final queryText = _sanitizeSearchQuery(filter.searchQuery ?? '');
+
+      if (queryText.isEmpty) {
+        await _ensurePermissionsLoaded();
+        var query = _client.from('voters').select('voter_symbol');
+        query = _applyAgentPermissionsFilter(
+          query,
+          includeManageableUnassigned: filter.includeManageableUnassigned,
+        );
+        query = _applyFilterConstraints(query, filter);
+        final rows = await _fetchPagedRows(query);
+        return rows.length;
+      }
+
+      await _ensurePermissionsLoaded();
+      var query = _client.from('voters').select(_selectWithJoins);
+      query = _applyAgentPermissionsFilter(
+        query,
+        includeManageableUnassigned: filter.includeManageableUnassigned,
+      );
+      query = _applyFilterConstraints(query, filter);
+      final rows = await _fetchPagedRows(query);
+      return rows.where((row) => _matchesSearchQuery(row, queryText)).length;
+    } catch (e) {
+      throw ServerException(message: 'خطأ في عد الناخبين: $e');
+    }
+  }
+
   /// Get paginated voters with optional filters.
   Future<List<VoterModel>> getVoters(VoterFilter filter) async {
+    final stopwatch = Stopwatch()..start();
     try {
       final queryText = _sanitizeSearchQuery(filter.searchQuery ?? '');
       final resultsBySymbol = <String, Map<String, dynamic>>{};
@@ -196,7 +382,10 @@ class SupabaseVoterDatasource {
       if (queryText.isEmpty) {
         await _ensurePermissionsLoaded();
         var query = _client.from('voters').select(_selectWithJoins);
-        query = _applyAgentPermissionsFilter(query);
+        query = _applyAgentPermissionsFilter(
+          query,
+          includeManageableUnassigned: filter.includeManageableUnassigned,
+        );
         query = _applyFilterConstraints(query, filter);
         final allVoters = await _fetchPagedRows(
           query,
@@ -207,63 +396,24 @@ class SupabaseVoterDatasource {
         print(
           'DEBUG: getVoters returned ${allVoters.length} records (with filters)',
         );
+        debugPrint(
+          '[SupabaseVoterDatasource] getVoters completed in '
+          '${stopwatch.elapsedMilliseconds}ms count=${allVoters.length}',
+        );
 
         return allVoters.map(VoterModel.fromJson).toList();
       }
 
-      final escapedQuery = _escapeOrValue(queryText);
-
       await _ensurePermissionsLoaded();
-      var byNameOrSymbolQuery = _client.from('voters').select(_selectWithJoins);
-      byNameOrSymbolQuery = _applyAgentPermissionsFilter(byNameOrSymbolQuery);
-      byNameOrSymbolQuery = _applyFilterConstraints(
-        byNameOrSymbolQuery,
-        filter,
+      var query = _client.from('voters').select(_selectWithJoins);
+      query = _applyAgentPermissionsFilter(
+        query,
+        includeManageableUnassigned: filter.includeManageableUnassigned,
       );
-      byNameOrSymbolQuery = byNameOrSymbolQuery.or(
-        'voter_symbol.ilike.%$escapedQuery%,first_name.ilike.%$escapedQuery%,father_name.ilike.%$escapedQuery%,grandfather_name.ilike.%$escapedQuery%',
-      );
-      final byNameOrSymbolRows = await _fetchPagedRows(byNameOrSymbolQuery);
-      for (final row in byNameOrSymbolRows) {
-        final symbol = row['voter_symbol'] as String;
-        resultsBySymbol[symbol] = row;
-      }
-
-      final familyData = await _client
-          .from('families')
-          .select('id')
-          .ilike('family_name', '%$queryText%');
-      final familyIds = (familyData as List)
-          .map((f) => f['id'] as int)
-          .toList();
-
-      if (familyIds.isNotEmpty) {
-        var byFamilyQuery = _client.from('voters').select(_selectWithJoins);
-        byFamilyQuery = _applyAgentPermissionsFilter(byFamilyQuery);
-        byFamilyQuery = _applyFilterConstraints(byFamilyQuery, filter);
-        byFamilyQuery = byFamilyQuery.inFilter('family_id', familyIds);
-        final byFamilyRows = await _fetchPagedRows(byFamilyQuery);
-        for (final row in byFamilyRows) {
-          final symbol = row['voter_symbol'] as String;
-          resultsBySymbol[symbol] = row;
-        }
-      }
-
-      final subClanData = await _client
-          .from('sub_clans')
-          .select('id')
-          .ilike('sub_name', '%$queryText%');
-      final subClanIds = (subClanData as List)
-          .map((s) => s['id'] as int)
-          .toList();
-
-      if (subClanIds.isNotEmpty) {
-        var bySubClanQuery = _client.from('voters').select(_selectWithJoins);
-        bySubClanQuery = _applyAgentPermissionsFilter(bySubClanQuery);
-        bySubClanQuery = _applyFilterConstraints(bySubClanQuery, filter);
-        bySubClanQuery = bySubClanQuery.inFilter('sub_clan_id', subClanIds);
-        final bySubClanRows = await _fetchPagedRows(bySubClanQuery);
-        for (final row in bySubClanRows) {
+      query = _applyFilterConstraints(query, filter);
+      final rows = await _fetchPagedRows(query);
+      for (final row in rows) {
+        if (_matchesSearchQuery(row, queryText)) {
           final symbol = row['voter_symbol'] as String;
           resultsBySymbol[symbol] = row;
         }
@@ -275,12 +425,22 @@ class SupabaseVoterDatasource {
             b['voter_symbol'] as String,
           ),
         );
+      final pagedVoters = filter.pageSize > 0
+          ? allVoters
+              .skip(filter.page * filter.pageSize)
+              .take(filter.pageSize)
+              .toList(growable: false)
+          : allVoters;
 
       print(
-        'DEBUG: getVoters returned ${allVoters.length} records (with filters)',
+        'DEBUG: getVoters returned ${pagedVoters.length} records (with filters)',
+      );
+      debugPrint(
+        '[SupabaseVoterDatasource] getVoters search completed in '
+        '${stopwatch.elapsedMilliseconds}ms count=${pagedVoters.length}',
       );
 
-      return allVoters.map(VoterModel.fromJson).toList();
+      return pagedVoters.map(VoterModel.fromJson).toList();
     } catch (e) {
       throw ServerException(message: 'خطأ في جلب بيانات الناخبين: $e');
     }
@@ -461,7 +621,7 @@ class SupabaseVoterDatasource {
           .eq('voter_symbol', voterSymbol)
           .select(_selectBasic);
 
-      if (responseList == null || (responseList as List).isEmpty) {
+      if (responseList.isEmpty) {
         throw ServerException(message: 'لم يتم العثور على الناخب في السيرفر أو لا تملك صلاحية تعديله');
       }
 
@@ -485,15 +645,15 @@ class SupabaseVoterDatasource {
   }) async {
     try {
       await _ensurePermissionsLoaded();
-      var query = _client.from('voters').select('status');
+      final stopwatch = Stopwatch()..start();
+      var query = _client.from('voters').select('voter_symbol, status');
       query = _applyAgentPermissionsFilter(query);
 
       if (familyId != null) query = query.eq('family_id', familyId);
       if (subClanId != null) query = query.eq('sub_clan_id', subClanId);
       if (centerId != null) query = query.eq('center_id', centerId);
 
-      final data = await query;
-      final list = data as List;
+      final list = await _fetchPagedRows(query);
 
       final total = list.length;
       final voted = list
@@ -504,13 +664,18 @@ class SupabaseVoterDatasource {
           .length;
       final notVoted = total - voted - refused;
 
-      return VoterStats(
+      final stats = VoterStats(
         total: total,
         voted: voted,
         refused: refused,
         notVoted: notVoted,
         votedPercentage: total > 0 ? (voted / total) * 100 : 0,
       );
+      debugPrint(
+        '[SupabaseVoterDatasource] getVoterStats completed in '
+        '${stopwatch.elapsedMilliseconds}ms total=$total',
+      );
+      return stats;
     } catch (e) {
       throw ServerException(message: 'خطأ في جلب الإحصائيات: $e');
     }
@@ -533,9 +698,17 @@ class SupabaseVoterDatasource {
   /// Update an existing voter.
   Future<VoterModel> updateVoter(VoterModel voter) async {
     try {
+      final payload = voter.toJson()
+        ..['family_id'] = voter.familyId
+        ..['sub_clan_id'] = voter.subClanId
+        ..['center_id'] = voter.centerId
+        ..['list_id'] = voter.listId
+        ..['candidate_id'] = voter.candidateId
+        ..['refusal_reason'] = voter.refusalReason;
+
       final data = await _client
           .from('voters')
-          .update(voter.toJson())
+          .update(payload)
           .eq('voter_symbol', voter.voterSymbol)
           .select(_selectWithJoins)
           .single();
@@ -551,6 +724,27 @@ class SupabaseVoterDatasource {
       await _client.from('voters').delete().eq('voter_symbol', voterSymbol);
     } catch (e) {
       throw ServerException(message: 'خطأ في حذف الناخب: $e');
+    }
+  }
+
+  /// Reset all voters to default state (not voted, no list/candidate).
+  Future<void> resetAllVoters() async {
+    try {
+      await _ensurePermissionsLoaded();
+      if (_agentUsername != 'admin') {
+        throw ServerException(message: 'غير مصرح لك بإجراء هذا التحديث الشامل. هذه الصلاحية مخصصة للمسؤول الرئيسي فقط.');
+      }
+
+      await _client.from('voters').update({
+        'status': AppConstants.statusNotVoted,
+        'refusal_reason': null,
+        'list_id': null,
+        'candidate_id': null,
+        'updated_by': _client.auth.currentUser?.id,
+      }).neq('voter_symbol', '');
+
+    } catch (e) {
+      throw ServerException(message: 'خطأ في تصفير المصوتين: $e');
     }
   }
 
@@ -643,6 +837,9 @@ class SupabaseVoterDatasource {
       allVoters.addAll((response as List).cast<Map<String, dynamic>>());
       if (response.length < pageSize) break;
       offset += pageSize;
+      // Small delay between chunks to avoid overwhelming connection pool
+      // when many agents sync simultaneously
+      await Future.delayed(const Duration(milliseconds: 100));
     }
 
     debugPrint(
@@ -733,39 +930,82 @@ class SupabaseVoterDatasource {
 
     if (response == null || (response as List).isEmpty) return [];
 
-    return (response as List).map((row) => row['candidate_id'] as int).toList();
+    return (response).map((row) => row['candidate_id'] as int).toList();
   }
 
   Future<Map<String, Map<int, int>>> getListAndCandidateVotes() async {
+    final stopwatch = Stopwatch()..start();
+    try {
+      final rpcResponse = await _client.rpc('get_list_and_candidate_votes');
+      if (rpcResponse is Map) {
+        final parsed = {
+          'listVotes': _parseCountMap(rpcResponse['listVotes']),
+          'candidateVotes': _parseCountMap(rpcResponse['candidateVotes']),
+        };
+        debugPrint(
+          '[SupabaseVoterDatasource] getListAndCandidateVotes via RPC in '
+          '${stopwatch.elapsedMilliseconds}ms '
+          'lists=${parsed['listVotes']!.length}, '
+          'candidates=${parsed['candidateVotes']!.length}',
+        );
+        return parsed;
+      }
+    } catch (rpcError) {
+      debugPrint(
+        '[SupabaseVoterDatasource] get_list_and_candidate_votes fallback '
+        'error=$rpcError',
+      );
+    }
+
     try {
       await _ensurePermissionsLoaded();
       var votersQuery = _client
           .from('voters')
-          .select('list_id')
+          .select('voter_symbol, list_id')
           .eq('status', AppConstants.statusVoted)
           .not('list_id', 'is', null);
       votersQuery = _applyAgentPermissionsFilter(votersQuery);
 
       final listData = await votersQuery;
       final Map<int, int> listVotes = {};
+      final visibleVoterSymbols = <String>[];
 
       for (final row in listData as List) {
+        final voterSymbol = row['voter_symbol'] as String?;
+        if (voterSymbol != null && voterSymbol.isNotEmpty) {
+          visibleVoterSymbols.add(voterSymbol);
+        }
         final listId = row['list_id'] as int;
         listVotes[listId] = (listVotes[listId] ?? 0) + 1;
       }
 
-      // Use filtered query for candidate votes
-      var candidatesQuery = _client
-          .from('voter_candidates')
-          .select('candidate_id');
-      final candidatesData = await candidatesQuery;
       final Map<int, int> candidateVotes = {};
+      const chunkSize = 500;
+      for (var i = 0; i < visibleVoterSymbols.length; i += chunkSize) {
+        final chunk = visibleVoterSymbols.sublist(
+          i,
+          i + chunkSize > visibleVoterSymbols.length
+              ? visibleVoterSymbols.length
+              : i + chunkSize,
+        );
+        if (chunk.isEmpty) continue;
 
-      for (final row in candidatesData as List) {
-        final candidateId = row['candidate_id'] as int;
-        candidateVotes[candidateId] = (candidateVotes[candidateId] ?? 0) + 1;
+        final candidatesData = await _client
+            .from('voter_candidates')
+            .select('candidate_id')
+            .inFilter('voter_symbol', chunk);
+
+        for (final row in candidatesData as List) {
+          final candidateId = row['candidate_id'] as int;
+          candidateVotes[candidateId] = (candidateVotes[candidateId] ?? 0) + 1;
+        }
       }
 
+      debugPrint(
+        '[SupabaseVoterDatasource] getListAndCandidateVotes fallback in '
+        '${stopwatch.elapsedMilliseconds}ms '
+        'lists=${listVotes.length}, candidates=${candidateVotes.length}',
+      );
       return {'listVotes': listVotes, 'candidateVotes': candidateVotes};
     } catch (e) {
       throw ServerException(

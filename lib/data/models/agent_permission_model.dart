@@ -6,6 +6,7 @@ class AgentPermissionModel {
   final String agentId;
   final int? familyId;
   final int? subClanId;
+  final bool isManager;
   final String? familyName;
   final String? subClanName;
 
@@ -14,6 +15,7 @@ class AgentPermissionModel {
     required this.agentId,
     this.familyId,
     this.subClanId,
+    this.isManager = false,
     this.familyName,
     this.subClanName,
   });
@@ -24,6 +26,7 @@ class AgentPermissionModel {
       agentId: json['agent_id'] as String,
       familyId: json['family_id'] as int?,
       subClanId: json['sub_clan_id'] as int?,
+      isManager: (json['is_manager'] as bool?) ?? false,
       familyName: json['families'] != null
           ? (json['families'] as Map<String, dynamic>)['family_name'] as String?
           : null,
@@ -38,6 +41,7 @@ class AgentPermissionModel {
       'agent_id': agentId,
       'family_id': familyId,
       'sub_clan_id': subClanId,
+      'is_manager': isManager,
     };
   }
 
@@ -47,6 +51,7 @@ class AgentPermissionModel {
       agentId: agentId,
       familyId: familyId,
       subClanId: subClanId,
+      isManager: isManager,
       familyName: familyName,
       subClanName: subClanName,
     );
@@ -58,6 +63,7 @@ class AgentPermissionModel {
       agentId: entity.agentId,
       familyId: entity.familyId,
       subClanId: entity.subClanId,
+      isManager: entity.isManager,
       familyName: entity.familyName,
       subClanName: entity.subClanName,
     );

@@ -3,7 +3,10 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:dropdown_search/dropdown_search.dart';
 
+import '../../../core/utils/pdf_print_service.dart';
+
 import '../../../core/di/injection_container.dart';
+import '../../../domain/repositories/voter_repository.dart';
 import '../../../domain/entities/candidate.dart';
 import '../../../domain/entities/electoral_list.dart';
 import '../../../domain/entities/family.dart';
@@ -135,9 +138,20 @@ class _FamiliesListState extends State<_FamiliesList> {
               final family = filteredList[index - 1];
               return ListTile(
                 title: Text(family.familyName),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete, color: Colors.red),
-                  onPressed: () => _confirmDeleteFamily(context, family),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.print, color: Colors.blue),
+                      tooltip: 'طباعة كشف ناخبي العائلة',
+                      onPressed: () => _printFamilyVoters(context, family),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      tooltip: 'حذف العائلة',
+                      onPressed: () => _confirmDeleteFamily(context, family),
+                    ),
+                  ],
                 ),
               );
             },
@@ -145,6 +159,42 @@ class _FamiliesListState extends State<_FamiliesList> {
         ),
       ],
     );
+  }
+
+  Future<void> _printFamilyVoters(BuildContext context, Family family) async {
+    try {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const Center(child: CircularProgressIndicator()),
+      );
+
+      // Fetch all voters for this family
+      final filter = VoterFilter(familyIds: [family.id], pageSize: 100000);
+      final result = await sl<VoterRepository>().getVoters(filter);
+      
+      if (context.mounted) Navigator.pop(context);
+
+      result.fold(
+        (failure) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('فشل جلب الناخبين: ${failure.message}')),
+            );
+          }
+        },
+        (voters) {
+          PdfPrintService.printVotersList('كشف ناخبين - عائلة ${family.familyName}', voters);
+        }
+      );
+    } catch (e) {
+      if (context.mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ أثناء تجهيز الطباعة: $e')),
+        );
+      }
+    }
   }
 
   Future<void> _confirmDeleteFamily(BuildContext context, Family family) async {
@@ -226,9 +276,20 @@ class _SubClansListState extends State<_SubClansList> {
               return ListTile(
                 title: Text(subClan.subName),
                 subtitle: Text(subClan.familyName ?? ''),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete, color: Colors.red),
-                  onPressed: () => _confirmDeleteSubClan(context, subClan),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.print, color: Colors.blue),
+                      tooltip: 'طباعة كشف ناخبي الفرع',
+                      onPressed: () => _printSubClanVoters(context, subClan),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      tooltip: 'حذف الفرع',
+                      onPressed: () => _confirmDeleteSubClan(context, subClan),
+                    ),
+                  ],
                 ),
               );
             },
@@ -236,6 +297,42 @@ class _SubClansListState extends State<_SubClansList> {
         ),
       ],
     );
+  }
+
+  Future<void> _printSubClanVoters(BuildContext context, SubClan subClan) async {
+    try {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const Center(child: CircularProgressIndicator()),
+      );
+
+      // Fetch all voters for this sub-clan
+      final filter = VoterFilter(subClanId: subClan.id, pageSize: 100000);
+      final result = await sl<VoterRepository>().getVoters(filter);
+      
+      if (context.mounted) Navigator.pop(context);
+
+      result.fold(
+        (failure) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('فشل جلب الناخبين: ${failure.message}')),
+            );
+          }
+        },
+        (voters) {
+          PdfPrintService.printVotersList('كشف ناخبين - فرع ${subClan.subName}', voters);
+        }
+      );
+    } catch (e) {
+      if (context.mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطأ أثناء تجهيز الطباعة: $e')),
+        );
+      }
+    }
   }
 
   Future<void> _confirmDeleteSubClan(BuildContext context, SubClan subClan) async {
@@ -622,7 +719,7 @@ void _showAddCandidateDialog(
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<ElectoralList?>(
-              value: selectedList,
+              initialValue: selectedList,
               decoration: const InputDecoration(
                 labelText: 'القائمة الانتخابية',
               ),

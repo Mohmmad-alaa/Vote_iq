@@ -7,6 +7,7 @@ class AgentModel {
   final String username;
   final String role;
   final bool isActive;
+  final bool canCreateAgents;
   final DateTime? createdAt;
 
   const AgentModel({
@@ -15,6 +16,7 @@ class AgentModel {
     required this.username,
     this.role = 'agent',
     this.isActive = true,
+    this.canCreateAgents = false,
     this.createdAt,
   });
 
@@ -25,6 +27,7 @@ class AgentModel {
       username: json['username'] as String,
       role: (json['role'] as String?) ?? 'agent',
       isActive: (json['is_active'] as bool?) ?? true,
+      canCreateAgents: (json['can_create_agents'] as bool?) ?? false,
       createdAt: json['created_at'] != null
           ? DateTime.parse(json['created_at'] as String)
           : null,
@@ -38,6 +41,7 @@ class AgentModel {
       'username': username,
       'role': role,
       'is_active': isActive,
+      'can_create_agents': canCreateAgents,
     };
   }
 
@@ -48,6 +52,7 @@ class AgentModel {
       username: username,
       role: role,
       isActive: isActive,
+      canCreateAgents: canCreateAgents,
       createdAt: createdAt,
     );
   }
@@ -59,6 +64,7 @@ class AgentModel {
       username: entity.username,
       role: entity.role,
       isActive: entity.isActive,
+      canCreateAgents: entity.canCreateAgents,
       createdAt: entity.createdAt,
     );
   }

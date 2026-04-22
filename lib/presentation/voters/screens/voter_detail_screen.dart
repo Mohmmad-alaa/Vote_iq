@@ -432,7 +432,7 @@ class _VoterDetailScreenState extends State<VoterDetailScreen> {
                       ),
                       const SizedBox(height: 16),
                       DropdownButtonFormField<int?>(
-                        value: selectedListId,
+                        initialValue: selectedListId,
                         decoration: const InputDecoration(
                           labelText: 'القائمة الانتخابية',
                           border: OutlineInputBorder(),

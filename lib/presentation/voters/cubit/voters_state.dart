@@ -21,6 +21,7 @@ class VotersLoading extends VotersState {
 /// Loaded state with voters list, filter info, and pagination.
 class VotersLoaded extends VotersState {
   final List<Voter> voters;
+  final int totalCount;
   final bool hasReachedEnd;
   final bool isLoadingMore;
   final List<int>? filterFamilyIds;
@@ -31,6 +32,7 @@ class VotersLoaded extends VotersState {
 
   const VotersLoaded({
     required this.voters,
+    required this.totalCount,
     this.hasReachedEnd = false,
     this.isLoadingMore = false,
     this.filterFamilyIds,
@@ -42,6 +44,7 @@ class VotersLoaded extends VotersState {
 
   VotersLoaded copyWith({
     List<Voter>? voters,
+    int? totalCount,
     bool? hasReachedEnd,
     bool? isLoadingMore,
     List<int>? filterFamilyIds,
@@ -52,6 +55,7 @@ class VotersLoaded extends VotersState {
   }) {
     return VotersLoaded(
       voters: voters ?? this.voters,
+      totalCount: totalCount ?? this.totalCount,
       hasReachedEnd: hasReachedEnd ?? this.hasReachedEnd,
       isLoadingMore: isLoadingMore ?? this.isLoadingMore,
       filterFamilyIds: filterFamilyIds ?? this.filterFamilyIds,
@@ -66,6 +70,7 @@ class VotersLoaded extends VotersState {
   List<Object?> get props => [
     voters.length,
     identityHashCode(voters),
+    totalCount,
     hasReachedEnd,
     isLoadingMore,
     filterFamilyIds,

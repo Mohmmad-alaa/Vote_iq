@@ -97,7 +97,7 @@ Deno.serve(async (req) => {
 
     const { data: callerAgent, error: callerError } = await adminClient
       .from("agents")
-      .select("id, role, is_active")
+      .select("id, role, is_active, can_create_agents")
       .eq("id", authData.user.id)
       .maybeSingle();
 
@@ -105,9 +105,12 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: callerError.message }, 403);
     }
 
+    const isCallerAdmin = callerAgent?.role === "admin";
+    const canCallerCreateAgents = callerAgent?.can_create_agents === true;
+
     if (
-      callerAgent == null || callerAgent["role"] !== "admin" ||
-      callerAgent["is_active"] != true
+      callerAgent == null || callerAgent["is_active"] != true ||
+      (!isCallerAdmin && !canCallerCreateAgents)
     ) {
       return jsonResponse({ error: "Forbidden" }, 403);
     }
@@ -116,9 +119,19 @@ Deno.serve(async (req) => {
     const username = normalizeUsername(String(payload.username ?? ""));
     const password = String(payload.password ?? "");
     const isAdmin = Boolean(payload.is_admin ?? false);
+    const canCreateAgents = Boolean(payload.can_create_agents ?? false);
 
     if (!fullName || !username || !password) {
       return jsonResponse({ error: "Missing required fields" }, 400);
+    }
+
+    if (!isCallerAdmin) {
+      if (isAdmin) {
+        return jsonResponse({ error: "لا تملك الصلاحية لإنشاء مسؤول نظام" }, 403);
+      }
+      if (canCreateAgents) {
+        return jsonResponse({ error: "لا تملك الصلاحية لتمكين إنشاء وكلاء لغيرك" }, 403);
+      }
     }
 
     const { data: existingAgent, error: existingAgentError } = await adminClient
@@ -181,6 +194,8 @@ Deno.serve(async (req) => {
         username,
         role: isAdmin ? "admin" : "agent",
         is_active: true,
+        can_create_agents: canCreateAgents,
+        created_by: authData.user.id,
       }, { onConflict: "id" })
       .select()
       .single();

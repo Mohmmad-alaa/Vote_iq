@@ -45,4 +45,7 @@ abstract class LookupRepository {
 
   /// Import Electoral Lists and Candidates from Excel
   Future<Either<Failure, int>> importListsAndCandidates(String filePath);
+
+  /// Clears locally cached lookup data for the current session.
+  Future<void> clearCache();
 }
