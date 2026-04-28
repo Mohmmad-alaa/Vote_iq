@@ -3,6 +3,9 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_constants.dart';
+import '../../../core/di/injection_container.dart';
+import '../../../core/utils/voter_household_sort.dart';
+import '../../../data/datasources/local/local_voter_datasource.dart';
 import '../../../domain/entities/candidate.dart';
 import '../../../domain/entities/voter.dart';
 import '../../lookup/cubit/lookup_cubit.dart';
@@ -22,6 +25,148 @@ class VoterDetailScreen extends StatefulWidget {
 
 class _VoterDetailScreenState extends State<VoterDetailScreen> {
   late Voter _voter;
+  Voter? _cachedHead;
+
+  bool get _isHusband =>
+      normalizeHouseholdRole(_voter.householdRole) == householdRoleHusband;
+
+
+
+  Future<void> _loadHouseholdHead() async {
+    if (_isHusband) return;
+    final householdGroup = normalizeHouseholdGroup(_voter.householdGroup);
+    if (householdGroup == null || householdGroup.isEmpty) return;
+
+    final localDs = sl<LocalVoterDatasource>();
+    final model = await localDs.getCachedVoter(householdGroup);
+    if (model != null && mounted) {
+      setState(() => _cachedHead = model.toEntity());
+    }
+  }
+
+  List<Voter> _householdMembers(BuildContext context) {
+    final state = context.read<VotersCubit>().state;
+    if (state is! VotersLoaded) {
+      return const <Voter>[];
+    }
+
+    final householdGroup = normalizeHouseholdGroup(_voter.householdGroup);
+    if (householdGroup == null || householdGroup.isEmpty) {
+      return const <Voter>[];
+    }
+
+    final members = state.voters.where((candidate) {
+      if (candidate.voterSymbol == _voter.voterSymbol) {
+        return false;
+      }
+      return normalizeHouseholdGroup(candidate.householdGroup) == householdGroup;
+    }).toList();
+
+    members.sort(compareVotersByHousehold);
+    return members;
+  }
+
+  bool _hasLinkedHousehold(BuildContext context) {
+    return _householdMembers(context).isNotEmpty;
+  }
+
+  Voter? _householdHead(BuildContext context) {
+    if (_isHusband) {
+      return _voter;
+    }
+
+    final householdGroup = normalizeHouseholdGroup(_voter.householdGroup);
+    if (householdGroup == null || householdGroup.isEmpty) {
+      return null;
+    }
+
+    // First check in loaded paginated voters
+    final state = context.read<VotersCubit>().state;
+    if (state is VotersLoaded) {
+      for (final candidate in state.voters) {
+        if (candidate.voterSymbol == householdGroup) {
+          return candidate;
+        }
+      }
+    }
+
+    // Fallback to cached head from local Hive
+    return _cachedHead;
+  }
+
+  void _openRelativeDetails(BuildContext context, Voter relative) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MultiBlocProvider(
+          providers: [
+            BlocProvider.value(value: context.read<VotersCubit>()),
+            BlocProvider.value(value: context.read<LookupCubit>()),
+          ],
+          child: VoterDetailScreen(voter: relative),
+        ),
+      ),
+    );
+  }
+
+  String _householdRoleLabel(String? role) {
+    switch (normalizeHouseholdRole(role)) {
+      case householdRoleWife:
+        return 'الزوجة';
+      case householdRoleChild:
+        return 'ابن/ابنة';
+      case householdRoleHusband:
+        return 'الزوج';
+      default:
+        return 'فرد من العائلة';
+    }
+  }
+
+  String _householdRoleDetailsLabel() {
+    final normalizedRole = normalizeHouseholdRole(_voter.householdRole);
+    if (normalizedRole == null || normalizedRole.isEmpty) {
+      return 'غير محدد';
+    }
+    if (normalizedRole == householdRoleHusband) {
+      return 'رب المنزل';
+    }
+    return _householdRoleLabel(normalizedRole);
+  }
+
+  String _householdRelationWithHeadLabel(BuildContext context) {
+    final normalizedRole = normalizeHouseholdRole(_voter.householdRole);
+    if (normalizedRole == null || normalizedRole.isEmpty) {
+      return 'غير محدد';
+    }
+
+    if (normalizedRole == householdRoleHusband) {
+      return 'رب الأسرة';
+    }
+
+    final householdGroup = normalizeHouseholdGroup(_voter.householdGroup);
+    final head = _householdHead(context);
+    final headName = head?.fullName.trim();
+    final roleLabel = _householdRoleLabel(normalizedRole);
+    
+    if (headName != null && headName.isNotEmpty) {
+      return '$roleLabel - $headName';
+    } else if (householdGroup != null && householdGroup.isNotEmpty) {
+      return '$roleLabel - $householdGroup';
+    }
+
+    return roleLabel;
+  }
+
+
+
+  String _householdHeadName(BuildContext context) {
+    final head = _householdHead(context);
+    final name = head?.fullName.trim();
+    if (name != null && name.isNotEmpty) {
+      return name;
+    }
+    return 'غير محدد';
+  }
 
   String _resolvedListName(BuildContext context) {
     if (_voter.listName != null && _voter.listName!.isNotEmpty) {
@@ -61,6 +206,7 @@ class _VoterDetailScreenState extends State<VoterDetailScreen> {
   void initState() {
     super.initState();
     _voter = widget.voter;
+    _loadHouseholdHead();
   }
 
   @override
@@ -171,6 +317,14 @@ class _VoterDetailScreenState extends State<VoterDetailScreen> {
                       ),
                       const Divider(height: 24),
                       _buildInfoRow(
+                        Icons.people_outline,
+                        'صلة القرابة',
+                        _householdRelationWithHeadLabel(context),
+                      ),
+
+
+                      const Divider(height: 24),
+                      _buildInfoRow(
                         Icons.how_to_vote_outlined,
                         'القائمة الانتخابية',
                         _resolvedListName(context),
@@ -185,6 +339,10 @@ class _VoterDetailScreenState extends State<VoterDetailScreen> {
                   ),
                 ),
               ),
+              if (_hasLinkedHousehold(context)) ...[
+                const SizedBox(height: 16),
+                _buildHouseholdCard(context),
+              ],
               const SizedBox(height: 24),
               const Text(
                 'تحديث الحالة',
@@ -252,6 +410,34 @@ class _VoterDetailScreenState extends State<VoterDetailScreen> {
                   ),
                 ],
               ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _voter.status == AppConstants.statusNotFound
+                      ? null
+                      : () => _updateStatus(context, AppConstants.statusNotFound),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.statusNotFound,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  icon: const Icon(
+                    Icons.person_off_outlined,
+                    color: Colors.white,
+                  ),
+                  label: const Text(
+                    'غير موجود',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -260,6 +446,228 @@ class _VoterDetailScreenState extends State<VoterDetailScreen> {
 
     
   }
+
+
+  Widget _buildHouseholdCard(BuildContext context) {
+    final members = _householdMembers(context);
+    final householdHeads = members
+        .where(
+          (member) =>
+              normalizeHouseholdRole(member.householdRole) == householdRoleHusband,
+        )
+        .toList(growable: false);
+    final wives = members
+        .where(
+          (member) =>
+              normalizeHouseholdRole(member.householdRole) == householdRoleWife,
+        )
+        .toList(growable: false);
+    final children = members
+        .where(
+          (member) =>
+              normalizeHouseholdRole(member.householdRole) == householdRoleChild,
+        )
+        .toList(growable: false);
+    final others = members
+        .where((member) {
+          final role = normalizeHouseholdRole(member.householdRole);
+          return role != householdRoleHusband &&
+              role != householdRoleWife &&
+              role != householdRoleChild;
+        })
+        .toList(growable: false);
+
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'العائلة',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: AppColors.textPrimary,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'الزوجة والأبناء المرتبطون برب المنزل هذا',
+              style: TextStyle(
+                fontSize: 13,
+                color: AppColors.textSecondary.withValues(alpha: 0.9),
+              ),
+            ),
+            const Divider(height: 24),
+            if (members.isEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Text(
+                  'لا توجد زوجة أو أبناء مرتبطون بهذا الزوج حاليًا.',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+              ),
+            if (householdHeads.isNotEmpty) ...[
+              const Text(
+                'رب المنزل',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 10),
+              ...householdHeads.map(
+                (head) => _buildHouseholdMemberTile(context, head),
+              ),
+            ],
+            if (householdHeads.isNotEmpty &&
+                (wives.isNotEmpty || children.isNotEmpty || others.isNotEmpty))
+              const SizedBox(height: 12),
+            if (wives.isNotEmpty) ...[
+              const Text(
+                'الزوجة',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 10),
+              ...wives.map((wife) => _buildHouseholdMemberTile(context, wife)),
+            ],
+            if (wives.isNotEmpty && (children.isNotEmpty || others.isNotEmpty))
+              const SizedBox(height: 12),
+            if (children.isNotEmpty) ...[
+              const Text(
+                'الأبناء',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 10),
+              ...children.map(
+                (child) => _buildHouseholdMemberTile(context, child),
+              ),
+            ],
+            if (children.isNotEmpty && others.isNotEmpty)
+              const SizedBox(height: 12),
+            if (others.isNotEmpty) ...[
+              const Text(
+                'أفراد آخرون',
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 10),
+              ...others.map(
+                (member) => _buildHouseholdMemberTile(context, member),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHouseholdMemberTile(BuildContext context, Voter member) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => _openRelativeDetails(context, member),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.border),
+            color: Colors.white,
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.family_restroom,
+                  color: AppColors.primary,
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      member.fullName.isNotEmpty
+                          ? member.fullName
+                          : member.voterSymbol,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'الرقم: ${member.voterSymbol}',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: AppColors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  _householdRoleLabel(member.householdRole),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.primary,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              const Icon(
+                Icons.arrow_forward_ios,
+                size: 14,
+                color: AppColors.textSecondary,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
 
 
   Widget _buildInfoRow(IconData icon, String label, String value) {
@@ -593,4 +1001,3 @@ class _VoterDetailScreenState extends State<VoterDetailScreen> {
     );
   }
 }
-

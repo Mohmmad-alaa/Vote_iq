@@ -76,7 +76,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ),
                 const SizedBox(height: 16),
                 _buildOverallStatsGrid(overall.total, overall.voted,
-                    overall.votedPercentage, overall.notVoted, overall.refused),
+                    overall.votedPercentage, overall.notVoted, overall.refused, overall.notFound),
                 const SizedBox(height: 32),
                 if (overall.total > 0) ...[
                   _buildSectionHeader(
@@ -116,6 +116,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             title: '',
                             radius: 50,
                           ),
+                          PieChartSectionData(
+                            color: AppColors.statusNotFound,
+                            value: overall.notFound.toDouble(),
+                            title: '',
+                            radius: 50,
+                          ),
                         ],
                       ),
                     ),
@@ -136,6 +142,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       _buildLegendItem(
                         AppColors.statusRefused,
                         AppConstants.statusRefused,
+                      ),
+                      const SizedBox(width: 16),
+                      _buildLegendItem(
+                        AppColors.statusNotFound,
+                        AppConstants.statusNotFound,
                       ),
                     ],
                   ),
@@ -902,6 +913,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     double votedPct,
     int notVoted,
     int refused,
+    int notFound,
   ) {
     final items = [
       _StatItem(label: 'إجمالي الناخبين', value: total,
@@ -913,6 +925,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
           icon: Icons.pending_actions_rounded, color: AppColors.statusNotVoted),
       _StatItem(label: 'رفض التصويت', value: refused,
           icon: Icons.cancel_rounded, color: AppColors.statusRefused),
+      _StatItem(label: 'غير موجود', value: notFound,
+          icon: Icons.person_off_outlined, color: AppColors.statusNotFound),
     ];
 
     return Column(
@@ -930,6 +944,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
             Expanded(child: _CompactStatCard(item: items[2])),
             const SizedBox(width: 12),
             Expanded(child: _CompactStatCard(item: items[3])),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(child: _CompactStatCard(item: items[4])),
+            const SizedBox(width: 12),
+            const Expanded(child: SizedBox.shrink()),
           ],
         ),
       ],

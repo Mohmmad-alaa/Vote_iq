@@ -15,6 +15,8 @@ class Voter extends Equatable {
   final String? refusalReason;
   final DateTime? updatedAt;
   final String? updatedBy;
+  final String? householdGroup;
+  final String? householdRole;
 
   // ── Resolved names (populated from joins) ──
   final String? familyName;
@@ -37,6 +39,8 @@ class Voter extends Equatable {
     this.refusalReason,
     this.updatedAt,
     this.updatedBy,
+    this.householdGroup,
+    this.householdRole,
     this.familyName,
     this.subClanName,
     this.centerName,
@@ -72,6 +76,8 @@ class Voter extends Equatable {
     String? refusalReason,
     DateTime? updatedAt,
     String? updatedBy,
+    String? householdGroup,
+    String? householdRole,
     String? familyName,
     String? subClanName,
     String? centerName,
@@ -92,6 +98,8 @@ class Voter extends Equatable {
       refusalReason: refusalReason ?? this.refusalReason,
       updatedAt: updatedAt ?? this.updatedAt,
       updatedBy: updatedBy ?? this.updatedBy,
+      householdGroup: householdGroup ?? this.householdGroup,
+      householdRole: householdRole ?? this.householdRole,
       familyName: familyName ?? this.familyName,
       subClanName: subClanName ?? this.subClanName,
       centerName: centerName ?? this.centerName,
@@ -115,6 +123,8 @@ class Voter extends Equatable {
         refusalReason,
         updatedAt,
         updatedBy,
+        householdGroup,
+        householdRole,
         listName,
         candidateName,
       ];

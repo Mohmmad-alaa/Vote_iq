@@ -24,6 +24,8 @@ class VoterCard extends StatelessWidget {
         return AppColors.statusVoted;
       case AppConstants.statusRefused:
         return AppColors.statusRefused;
+      case AppConstants.statusNotFound:
+        return AppColors.statusNotFound;
       default:
         return AppColors.statusNotVoted;
     }

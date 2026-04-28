@@ -9,6 +9,7 @@ class VoterStats {
   final int voted;
   final int refused;
   final int notVoted;
+  final int notFound;
   final double votedPercentage;
 
   const VoterStats({
@@ -16,6 +17,7 @@ class VoterStats {
     required this.voted,
     required this.refused,
     required this.notVoted,
+    required this.notFound,
     required this.votedPercentage,
   });
 }
@@ -116,6 +118,12 @@ abstract class VoterRepository {
 
   /// Import voters from an Excel file.
   Future<Either<Failure, int>> importVoters(String filePath);
+
+  /// Safely update household fields only for existing voters from Excel.
+  Future<Either<Failure, int>> importVoterHouseholdData(String filePath);
+
+  /// Safely update family and sub-clan fields only for existing voters from Excel.
+  Future<Either<Failure, int>> importVoterSubClans(String filePath);
 
   /// Get all unique family names (for filter dropdown).
   Future<Either<Failure, List<String>>> getAllUniqueFamilies();

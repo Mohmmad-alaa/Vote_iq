@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../core/constants/app_constants.dart';
+import '../../../core/utils/voter_household_sort.dart';
 import '../../../domain/entities/voter.dart';
 import '../../../domain/repositories/voter_repository.dart';
 import '../../../domain/usecases/voter/get_voters_usecase.dart';
@@ -22,6 +23,8 @@ class VotersCubit extends Cubit<VotersState> {
   final UpdateVoterUseCase _updateVoterUseCase;
   final DeleteVoterUseCase _deleteVoterUseCase;
   final ImportVotersUseCase _importVotersUseCase;
+  final ImportVoterHouseholdDataUseCase _importVoterHouseholdDataUseCase;
+  final ImportVoterSubClansUseCase _importVoterSubClansUseCase;
   final VoterRepository _voterRepository;
 
   StreamSubscription? _realtimeSubscription;
@@ -39,6 +42,8 @@ class VotersCubit extends Cubit<VotersState> {
     required UpdateVoterUseCase updateVoterUseCase,
     required DeleteVoterUseCase deleteVoterUseCase,
     required ImportVotersUseCase importVotersUseCase,
+    required ImportVoterHouseholdDataUseCase importVoterHouseholdDataUseCase,
+    required ImportVoterSubClansUseCase importVoterSubClansUseCase,
     required VoterRepository voterRepository,
   }) : _getVotersUseCase = getVotersUseCase,
        _searchVotersUseCase = searchVotersUseCase,
@@ -47,6 +52,8 @@ class VotersCubit extends Cubit<VotersState> {
        _updateVoterUseCase = updateVoterUseCase,
        _deleteVoterUseCase = deleteVoterUseCase,
        _importVotersUseCase = importVotersUseCase,
+       _importVoterHouseholdDataUseCase = importVoterHouseholdDataUseCase,
+       _importVoterSubClansUseCase = importVoterSubClansUseCase,
        _voterRepository = voterRepository,
        super(const VotersInitial()) {
     _syncSubscription = _voterRepository.onFullSyncComplete.listen((_) {
@@ -106,19 +113,21 @@ class VotersCubit extends Cubit<VotersState> {
         }
       },
       (voters) {
+        final sortedVoters = List<Voter>.from(voters)
+          ..sort(compareVotersByHousehold);
         _currentPage = 0;
         _isLoadingMore = false;
         debugPrint(
-          '[VotersCubit] load success: count=${voters.length}, '
+          '[VotersCubit] load success: count=${sortedVoters.length}, '
           'familyIds=$familyIds, subClanId=$subClanId, centerId=$centerId, '
           'status=$status, searchQuery=${filter.searchQuery}, '
           'durationMs=${stopwatch.elapsedMilliseconds}',
         );
         emit(
           VotersLoaded(
-            voters: voters,
-            totalCount: totalCount > 0 ? totalCount : voters.length,
-            hasReachedEnd: voters.length < pageSize,
+            voters: sortedVoters,
+            totalCount: totalCount > 0 ? totalCount : sortedVoters.length,
+            hasReachedEnd: sortedVoters.length < pageSize,
             filterFamilyIds: familyIds,
             filterSubClanId: subClanId,
             filterCenterId: centerId,
@@ -197,6 +206,7 @@ class VotersCubit extends Cubit<VotersState> {
             merged.add(voter);
           }
         }
+        merged.sort(compareVotersByHousehold);
 
         debugPrint(
           '[VotersCubit] loadMore success: page=$nextPage, '
@@ -398,6 +408,30 @@ class VotersCubit extends Cubit<VotersState> {
     );
   }
 
+  Future<void> importVoterHouseholdData(String filePath) async {
+    debugPrint(
+      '[VotersCubit] importVoterHouseholdData called with path: $filePath',
+    );
+    emit(const VotersLoading());
+    final result = await _importVoterHouseholdDataUseCase(filePath);
+    result.fold(
+      (failure) => emit(VotersError(failure.message)),
+      (_) => refreshCurrentView(forceRefresh: true),
+    );
+  }
+
+  Future<void> importVoterSubClans(String filePath) async {
+    debugPrint(
+      '[VotersCubit] importVoterSubClans called with path: $filePath',
+    );
+    emit(const VotersLoading());
+    final result = await _importVoterSubClansUseCase(filePath);
+    result.fold(
+      (failure) => emit(VotersError(failure.message)),
+      (_) => refreshCurrentView(forceRefresh: true),
+    );
+  }
+
   /// Get all unique family names for filter dropdown.
   Future<List<String>> getAllUniqueFamilies() async {
     final result = await _voterRepository.getAllUniqueFamilies();
@@ -449,6 +483,7 @@ class VotersCubit extends Cubit<VotersState> {
     if (existingIndex >= 0) {
       if (matchesCurrentView) {
         updatedList[existingIndex] = updatedVoter;
+        updatedList.sort(compareVotersByHousehold);
       } else {
         updatedList.removeAt(existingIndex);
         if (updatedTotalCount > 0) {
@@ -456,12 +491,11 @@ class VotersCubit extends Cubit<VotersState> {
         }
       }
     } else if (matchesCurrentView) {
-      // Binary insert to maintain sorted order without full re-sort
-      final symbol = updatedVoter.voterSymbol;
+      // Binary insert to maintain the default household-aware order.
       int lo = 0, hi = updatedList.length;
       while (lo < hi) {
         final mid = (lo + hi) >> 1;
-        if (updatedList[mid].voterSymbol.compareTo(symbol) < 0) {
+        if (compareVotersByHousehold(updatedList[mid], updatedVoter) < 0) {
           lo = mid + 1;
         } else {
           hi = mid;

@@ -138,6 +138,12 @@ Future<void> initDependencies() async {
   sl.registerLazySingleton(() => UpdateVoterUseCase(sl<VoterRepository>()));
   sl.registerLazySingleton(() => DeleteVoterUseCase(sl<VoterRepository>()));
   sl.registerLazySingleton(() => ImportVotersUseCase(sl<VoterRepository>()));
+  sl.registerLazySingleton(
+    () => ImportVoterHouseholdDataUseCase(sl<VoterRepository>()),
+  );
+  sl.registerLazySingleton(
+    () => ImportVoterSubClansUseCase(sl<VoterRepository>()),
+  );
 
   // Lookup CRUD
   sl.registerLazySingleton(() => AddFamilyUseCase(sl<LookupRepository>()));
@@ -179,6 +185,8 @@ Future<void> initDependencies() async {
       updateVoterUseCase: sl<UpdateVoterUseCase>(),
       deleteVoterUseCase: sl<DeleteVoterUseCase>(),
       importVotersUseCase: sl<ImportVotersUseCase>(),
+      importVoterHouseholdDataUseCase: sl<ImportVoterHouseholdDataUseCase>(),
+      importVoterSubClansUseCase: sl<ImportVoterSubClansUseCase>(),
       voterRepository: sl<VoterRepository>(),
     ),
   );

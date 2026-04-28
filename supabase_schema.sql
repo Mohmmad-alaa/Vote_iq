@@ -37,6 +37,8 @@ CREATE TABLE agents (
     role        TEXT    NOT NULL DEFAULT 'agent'
                         CHECK (role IN ('admin', 'agent')),
     is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    can_create_agents BOOLEAN NOT NULL DEFAULT FALSE,
+    created_by  UUID REFERENCES agents(id) ON DELETE SET NULL,
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -46,6 +48,7 @@ CREATE TABLE agent_permissions (
     agent_id    UUID    NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     family_id   INTEGER REFERENCES families(id)  ON DELETE CASCADE,
     sub_clan_id INTEGER REFERENCES sub_clans(id) ON DELETE CASCADE,
+    is_manager  BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (agent_id, family_id, sub_clan_id)
 );
 
@@ -61,6 +64,16 @@ CREATE TABLE voters (
     status            TEXT    NOT NULL DEFAULT 'لم يصوت'
                               CHECK (status IN ('لم يصوت', 'تم التصويت', 'رفض')),
     refusal_reason    TEXT,
+    household_group   TEXT,
+    household_role    TEXT CHECK (household_role IN ('husband', 'wife', 'child', 'other')),
+    household_role_rank SMALLINT GENERATED ALWAYS AS (
+                          CASE household_role
+                              WHEN 'husband' THEN 0
+                              WHEN 'wife' THEN 1
+                              WHEN 'child' THEN 2
+                              ELSE 3
+                          END
+                      ) STORED,
     updated_at        TIMESTAMPTZ DEFAULT NOW(),
     updated_by        UUID REFERENCES agents(id),
     search_text       TEXT GENERATED ALWAYS AS (
@@ -76,6 +89,7 @@ CREATE INDEX voters_family_idx  ON voters (family_id);
 CREATE INDEX voters_subclan_idx ON voters (sub_clan_id);
 CREATE INDEX voters_center_idx  ON voters (center_id);
 CREATE INDEX voters_status_idx  ON voters (status);
+CREATE INDEX voters_household_sort_idx ON voters (family_id, household_group, household_role_rank, voter_symbol);
 
 -- 7. Trigger
 CREATE OR REPLACE FUNCTION set_updated_at()
@@ -91,6 +105,61 @@ CREATE TRIGGER voters_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION set_updated_at();
 
+CREATE OR REPLACE FUNCTION auth_is_admin()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM agents
+        WHERE id = auth.uid()
+          AND role = 'admin'
+          AND is_active = TRUE
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION auth_is_active_agent()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM agents
+        WHERE id = auth.uid()
+          AND role = 'agent'
+          AND is_active = TRUE
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION auth_created_agent(target_agent_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM agents
+        WHERE id = target_agent_id
+          AND created_by = auth.uid()
+    );
+$$;
+
+REVOKE ALL ON FUNCTION auth_is_admin() FROM PUBLIC;
+REVOKE ALL ON FUNCTION auth_is_active_agent() FROM PUBLIC;
+REVOKE ALL ON FUNCTION auth_created_agent(UUID) FROM PUBLIC;
+
+GRANT EXECUTE ON FUNCTION auth_is_admin() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION auth_is_active_agent() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION auth_created_agent(UUID) TO authenticated, service_role;
+
 -- 8. RLS
 ALTER TABLE voters          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agents          ENABLE ROW LEVEL SECURITY;
@@ -100,13 +169,33 @@ ALTER TABLE sub_clans       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE voting_centers  ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "voters_admin_all" ON voters
-    FOR ALL USING (
-        EXISTS (SELECT 1 FROM agents WHERE id = auth.uid() AND role = 'admin' AND is_active = TRUE)
-    );
+    FOR ALL USING (auth_is_admin())
+    WITH CHECK (auth_is_admin());
 
 CREATE POLICY "voters_agent_access" ON voters
     FOR ALL USING (
-        EXISTS (SELECT 1 FROM agents a WHERE a.id = auth.uid() AND a.role = 'agent' AND a.is_active = TRUE)
+        auth_is_active_agent()
+        AND EXISTS (
+            SELECT 1 FROM agent_permissions ap
+            WHERE ap.agent_id = auth.uid()
+              AND (
+                  ap.family_id IS NULL
+                  OR (
+                      ap.family_id = voters.family_id
+                      AND (
+                          ap.sub_clan_id IS NULL
+                          OR ap.sub_clan_id = voters.sub_clan_id
+                      )
+                  )
+                  OR (
+                      ap.is_manager = TRUE
+                      AND voters.sub_clan_id IS NULL
+                  )
+              )
+        )
+    )
+    WITH CHECK (
+        auth_is_active_agent()
         AND EXISTS (
             SELECT 1 FROM agent_permissions ap
             WHERE ap.agent_id = auth.uid()
@@ -128,34 +217,29 @@ CREATE POLICY "voters_agent_access" ON voters
     );
 
 CREATE POLICY "voters_agent_no_delete" ON voters
-    FOR DELETE USING (
-        EXISTS (SELECT 1 FROM agents WHERE id = auth.uid() AND role = 'admin')
-    );
+    FOR DELETE USING (auth_is_admin());
 
 CREATE POLICY "agents_self_read" ON agents FOR SELECT USING (id = auth.uid());
-CREATE POLICY "agents_admin_all" ON agents FOR ALL USING (
-    EXISTS (SELECT 1 FROM agents WHERE id = auth.uid() AND role = 'admin')
-);
+CREATE POLICY "agents_admin_all" ON agents FOR ALL USING (auth_is_admin())
+    WITH CHECK (auth_is_admin());
+CREATE POLICY "agents_created_by_read" ON agents FOR SELECT USING (auth_created_agent(id));
 
 CREATE POLICY "families_read_all" ON families FOR SELECT USING (auth.uid() IS NOT NULL);
-CREATE POLICY "families_admin_write" ON families FOR ALL USING (
-    EXISTS (SELECT 1 FROM agents WHERE id = auth.uid() AND role = 'admin')
-);
+CREATE POLICY "families_admin_write" ON families FOR ALL USING (auth_is_admin())
+    WITH CHECK (auth_is_admin());
 
 CREATE POLICY "sub_clans_read_all" ON sub_clans FOR SELECT USING (auth.uid() IS NOT NULL);
-CREATE POLICY "sub_clans_admin_write" ON sub_clans FOR ALL USING (
-    EXISTS (SELECT 1 FROM agents WHERE id = auth.uid() AND role = 'admin')
-);
+CREATE POLICY "sub_clans_admin_write" ON sub_clans FOR ALL USING (auth_is_admin())
+    WITH CHECK (auth_is_admin());
 
 CREATE POLICY "centers_read_all" ON voting_centers FOR SELECT USING (auth.uid() IS NOT NULL);
-CREATE POLICY "centers_admin_write" ON voting_centers FOR ALL USING (
-    EXISTS (SELECT 1 FROM agents WHERE id = auth.uid() AND role = 'admin')
-);
+CREATE POLICY "centers_admin_write" ON voting_centers FOR ALL USING (auth_is_admin())
+    WITH CHECK (auth_is_admin());
 
-CREATE POLICY "permissions_admin_all" ON agent_permissions FOR ALL USING (
-    EXISTS (SELECT 1 FROM agents WHERE id = auth.uid() AND role = 'admin')
-);
+CREATE POLICY "permissions_admin_all" ON agent_permissions FOR ALL USING (auth_is_admin())
+    WITH CHECK (auth_is_admin());
 CREATE POLICY "permissions_self_read" ON agent_permissions FOR SELECT USING (agent_id = auth.uid());
+CREATE POLICY "permissions_created_by_read" ON agent_permissions FOR SELECT USING (auth_created_agent(agent_id));
 
 -- 9. Real-time
 ALTER PUBLICATION supabase_realtime ADD TABLE voters;

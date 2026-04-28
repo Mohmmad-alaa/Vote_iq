@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/constants/app_constants.dart';
 import '../../../core/errors/exceptions.dart';
+import '../../../core/utils/voter_household_sort.dart';
 import '../../../domain/repositories/voter_repository.dart';
 import '../../models/voter_model.dart';
 
@@ -25,6 +26,7 @@ class SupabaseVoterDatasource {
   bool _hasGlobalManagerAccess = false;
   DateTime? _permissionsCacheTime;
   String? _permissionsLoadedForUserId;
+  bool? _householdColumnsAvailable;
   static const Duration _permissionsTTL = Duration(minutes: 10);
 
   SupabaseVoterDatasource(this._client);
@@ -312,34 +314,111 @@ class SupabaseVoterDatasource {
     return parsed;
   }
 
+  bool _isMissingHouseholdColumnError(Object error) {
+    if (error is PostgrestException) {
+      final details = [
+        error.message,
+        error.details,
+        error.hint,
+      ].join(' ').toLowerCase();
+      return error.code == '42703' &&
+          (details.contains('household_group') ||
+              details.contains('household_role') ||
+              details.contains('household_role_rank'));
+    }
+
+    final text = error.toString().toLowerCase();
+    return text.contains('42703') &&
+        (text.contains('household_group') ||
+            text.contains('household_role') ||
+            text.contains('household_role_rank'));
+  }
+
+  void _markHouseholdColumnsUnavailable(String operation) {
+    if (_householdColumnsAvailable == false) {
+      return;
+    }
+    _householdColumnsAvailable = false;
+    debugPrint(
+      '[SupabaseVoterDatasource] household columns unavailable during '
+      '$operation, falling back to legacy schema behavior',
+    );
+  }
+
+  Map<String, dynamic> _stripHouseholdFields(
+    Map<String, dynamic> payload,
+  ) {
+    final sanitized = Map<String, dynamic>.from(payload);
+    sanitized.remove('household_group');
+    sanitized.remove('household_role');
+    sanitized.remove('household_role_rank');
+    return sanitized;
+  }
+
+  List<Map<String, dynamic>> _stripHouseholdFieldsFromList(
+    List<Map<String, dynamic>> rows,
+  ) {
+    return rows.map(_stripHouseholdFields).toList(growable: false);
+  }
+
   Future<List<Map<String, dynamic>>> _fetchPagedRows(
     dynamic query, {
     int page = 0,
     int pageSize = 0,
   }) async {
-    if (pageSize > 0) {
-      final offset = page * pageSize;
-      final response = await query
-          .order('voter_symbol', ascending: true)
-          .range(offset, offset + pageSize - 1);
-      return (response as List).cast<Map<String, dynamic>>();
+    dynamic buildOrderedQuery(bool includeHouseholdSort) {
+      var ordered = query.order('family_id', ascending: true);
+      if (includeHouseholdSort) {
+        ordered = ordered
+            .order('household_group', ascending: true)
+            .order('household_role_rank', ascending: true);
+      }
+      return ordered.order('voter_symbol', ascending: true);
     }
 
-    final allRows = <Map<String, dynamic>>[];
-    const chunkSize = 1000;
-    int offset = 0;
+    Future<List<Map<String, dynamic>>> runFetch(bool includeHouseholdSort) async {
+      final orderedQuery = buildOrderedQuery(includeHouseholdSort);
 
-    while (true) {
-      final response = await query
-          .order('voter_symbol', ascending: true)
-          .range(offset, offset + chunkSize - 1);
-      if (response.isEmpty) break;
-      allRows.addAll((response as List).cast<Map<String, dynamic>>());
-      if (response.length < chunkSize) break;
-      offset += chunkSize;
+      if (pageSize > 0) {
+        final offset = page * pageSize;
+        final response = await orderedQuery.range(offset, offset + pageSize - 1);
+        return (response as List).cast<Map<String, dynamic>>();
+      }
+
+      final allRows = <Map<String, dynamic>>[];
+      const chunkSize = 1000;
+      int offset = 0;
+
+      while (true) {
+        final response = await orderedQuery.range(offset, offset + chunkSize - 1);
+        if (response.isEmpty) {
+          break;
+        }
+        allRows.addAll((response as List).cast<Map<String, dynamic>>());
+        if (response.length < chunkSize) {
+          break;
+        }
+        offset += chunkSize;
+      }
+
+      return allRows;
     }
 
-    return allRows;
+    if (_householdColumnsAvailable == false) {
+      return runFetch(false);
+    }
+
+    try {
+      final rows = await runFetch(true);
+      _householdColumnsAvailable ??= true;
+      return rows;
+    } catch (e) {
+      if (_isMissingHouseholdColumnError(e)) {
+        _markHouseholdColumnsUnavailable('_fetchPagedRows');
+        return runFetch(false);
+      }
+      rethrow;
+    }
   }
 
   Future<int> getVotersCount(VoterFilter filter) async {
@@ -420,11 +499,7 @@ class SupabaseVoterDatasource {
       }
 
       final allVoters = resultsBySymbol.values.toList()
-        ..sort(
-          (a, b) => (a['voter_symbol'] as String).compareTo(
-            b['voter_symbol'] as String,
-          ),
-        );
+        ..sort(compareVoterMapsByHousehold);
       final pagedVoters = filter.pageSize > 0
           ? allVoters
               .skip(filter.page * filter.pageSize)
@@ -514,11 +589,7 @@ class SupabaseVoterDatasource {
       }
 
       final sorted = resultsBySymbol.values.toList()
-        ..sort(
-          (a, b) => (a['voter_symbol'] as String).compareTo(
-            b['voter_symbol'] as String,
-          ),
-        );
+        ..sort(compareVoterMapsByHousehold);
 
       return sorted.map(VoterModel.fromJson).toList();
     } catch (e) {
@@ -662,13 +733,17 @@ class SupabaseVoterDatasource {
       final refused = list
           .where((r) => r['status'] == AppConstants.statusRefused)
           .length;
-      final notVoted = total - voted - refused;
+      final notFound = list
+          .where((r) => r['status'] == AppConstants.statusNotFound)
+          .length;
+      final notVoted = total - voted - refused - notFound;
 
       final stats = VoterStats(
         total: total,
         voted: voted,
         refused: refused,
         notVoted: notVoted,
+        notFound: notFound,
         votedPercentage: total > 0 ? (voted / total) * 100 : 0,
       );
       debugPrint(
@@ -684,11 +759,32 @@ class SupabaseVoterDatasource {
   /// Create a new voter.
   Future<VoterModel> createVoter(VoterModel voter) async {
     try {
-      final data = await _client
-          .from('voters')
-          .insert(voter.toJson())
-          .select(_selectWithJoins)
-          .single();
+      final payload = voter.toJson();
+
+      Future<dynamic> execute(Map<String, dynamic> requestBody) {
+        return _client
+            .from('voters')
+            .insert(requestBody)
+            .select(_selectWithJoins)
+            .single();
+      }
+
+      dynamic data;
+      if (_householdColumnsAvailable == false) {
+        data = await execute(_stripHouseholdFields(payload));
+      } else {
+        try {
+          data = await execute(payload);
+          _householdColumnsAvailable ??= true;
+        } catch (e) {
+          if (_isMissingHouseholdColumnError(e)) {
+            _markHouseholdColumnsUnavailable('createVoter');
+            data = await execute(_stripHouseholdFields(payload));
+          } else {
+            rethrow;
+          }
+        }
+      }
       return VoterModel.fromJson(data);
     } catch (e) {
       throw ServerException(message: 'خطأ في إضافة الناخب: $e');
@@ -704,14 +800,35 @@ class SupabaseVoterDatasource {
         ..['center_id'] = voter.centerId
         ..['list_id'] = voter.listId
         ..['candidate_id'] = voter.candidateId
-        ..['refusal_reason'] = voter.refusalReason;
+        ..['refusal_reason'] = voter.refusalReason
+        ..['household_group'] = voter.householdGroup
+        ..['household_role'] = voter.householdRole;
 
-      final data = await _client
-          .from('voters')
-          .update(payload)
-          .eq('voter_symbol', voter.voterSymbol)
-          .select(_selectWithJoins)
-          .single();
+      Future<dynamic> execute(Map<String, dynamic> requestBody) {
+        return _client
+            .from('voters')
+            .update(requestBody)
+            .eq('voter_symbol', voter.voterSymbol)
+            .select(_selectWithJoins)
+            .single();
+      }
+
+      dynamic data;
+      if (_householdColumnsAvailable == false) {
+        data = await execute(_stripHouseholdFields(payload));
+      } else {
+        try {
+          data = await execute(payload);
+          _householdColumnsAvailable ??= true;
+        } catch (e) {
+          if (_isMissingHouseholdColumnError(e)) {
+            _markHouseholdColumnsUnavailable('updateVoter');
+            data = await execute(_stripHouseholdFields(payload));
+          } else {
+            rethrow;
+          }
+        }
+      }
       return VoterModel.fromJson(data);
     } catch (e) {
       throw ServerException(message: 'خطأ في تحديث بيانات الناخب: $e');
@@ -751,19 +868,157 @@ class SupabaseVoterDatasource {
   /// Bulk insert voters (for Excel import).
   Future<void> bulkInsertVoters(List<VoterModel> voters) async {
     try {
-      final jsonList = voters.map((v) => v.toJson()).toList();
+      final jsonList = voters.map((v) => v.toJson()).toList(growable: false);
 
-      // Chunking to avoid Supabase/PostgREST payload limits
-      const chunkSize = 1000;
-      for (var i = 0; i < jsonList.length; i += chunkSize) {
-        final end = (i + chunkSize < jsonList.length)
-            ? i + chunkSize
-            : jsonList.length;
-        final chunk = jsonList.sublist(i, end);
-        await _client.from('voters').upsert(chunk, onConflict: 'voter_symbol');
+      Future<void> execute(List<Map<String, dynamic>> rows) async {
+        const chunkSize = 1000;
+        for (var i = 0; i < rows.length; i += chunkSize) {
+          final end = (i + chunkSize < rows.length) ? i + chunkSize : rows.length;
+          final chunk = rows.sublist(i, end);
+          await _client.from('voters').upsert(chunk, onConflict: 'voter_symbol');
+        }
+      }
+
+      if (_householdColumnsAvailable == false) {
+        await execute(_stripHouseholdFieldsFromList(jsonList));
+      } else {
+        try {
+          await execute(jsonList);
+          _householdColumnsAvailable ??= true;
+        } catch (e) {
+          if (_isMissingHouseholdColumnError(e)) {
+            _markHouseholdColumnsUnavailable('bulkInsertVoters');
+            await execute(_stripHouseholdFieldsFromList(jsonList));
+          } else {
+            rethrow;
+          }
+        }
       }
     } catch (e) {
       throw ServerException(message: 'خطأ في الاستيراد الجماعي: $e');
+    }
+  }
+
+  /// Returns the subset of voter symbols that already exist remotely.
+  Future<Set<String>> getExistingVoterSymbols(List<String> voterSymbols) async {
+    try {
+      final existing = <String>{};
+      const chunkSize = 500;
+
+      for (var i = 0; i < voterSymbols.length; i += chunkSize) {
+        final end = (i + chunkSize < voterSymbols.length)
+            ? i + chunkSize
+            : voterSymbols.length;
+        final chunk = voterSymbols.sublist(i, end);
+        if (chunk.isEmpty) {
+          continue;
+        }
+
+        final rows = await _client
+            .from('voters')
+            .select('voter_symbol')
+            .inFilter('voter_symbol', chunk);
+
+        for (final row in rows as List) {
+          final symbol = (row as Map<String, dynamic>)['voter_symbol'] as String?;
+          if (symbol != null && symbol.isNotEmpty) {
+            existing.add(symbol);
+          }
+        }
+      }
+
+      return existing;
+    } catch (e) {
+      throw ServerException(
+        message: 'خطأ في فحص الناخبين الموجودين قبل التحديث الآمن: $e',
+      );
+    }
+  }
+
+  /// Updates household columns only and never inserts new voters.
+  Future<int> bulkUpdateVoterHouseholds(List<VoterModel> voters) async {
+    try {
+      if (_householdColumnsAvailable == false) {
+        throw ServerException(
+          message: 'أعمدة الأسرة غير متوفرة في قاعدة البيانات الحالية.',
+        );
+      }
+
+      var updatedCount = 0;
+      const chunkSize = 50;
+
+      for (var i = 0; i < voters.length; i += chunkSize) {
+        final end = (i + chunkSize < voters.length) ? i + chunkSize : voters.length;
+        final chunk = voters.sublist(i, end);
+
+        Future<void> updateChunk() async {
+          await Future.wait(
+            chunk.map<Future<dynamic>>((voter) {
+              final payload = <String, dynamic>{
+                'household_group': voter.householdGroup,
+                'household_role': voter.householdRole,
+              };
+              return _client
+                  .from('voters')
+                  .update(payload)
+                  .eq('voter_symbol', voter.voterSymbol);
+            }),
+          );
+        }
+
+        try {
+          await updateChunk();
+          updatedCount += chunk.length;
+          _householdColumnsAvailable ??= true;
+        } catch (e) {
+          if (_isMissingHouseholdColumnError(e)) {
+            _markHouseholdColumnsUnavailable('bulkUpdateVoterHouseholds');
+            throw ServerException(
+              message:
+                  'تعذر تنفيذ التحديث الآمن لأن أعمدة الأسرة غير موجودة في قاعدة البيانات.',
+            );
+          }
+          rethrow;
+        }
+      }
+
+      return updatedCount;
+    } catch (e) {
+      if (e is ServerException) {
+        rethrow;
+      }
+      throw ServerException(message: 'خطأ في التحديث الآمن لبيانات الأسرة: $e');
+    }
+  }
+
+  /// Updates family and sub_clan columns only and never inserts new voters.
+  Future<int> bulkUpdateVoterSubClans(List<VoterModel> voters) async {
+    try {
+      var updatedCount = 0;
+      const chunkSize = 50;
+
+      for (var i = 0; i < voters.length; i += chunkSize) {
+        final end = (i + chunkSize < voters.length) ? i + chunkSize : voters.length;
+        final chunk = voters.sublist(i, end);
+
+        await Future.wait(
+          chunk.map<Future<dynamic>>((voter) {
+            final payload = <String, dynamic>{
+              'family_id': voter.familyId,
+              'sub_clan_id': voter.subClanId,
+            };
+            return _client
+                .from('voters')
+                .update(payload)
+                .eq('voter_symbol', voter.voterSymbol);
+          }),
+        );
+        updatedCount += chunk.length;
+      }
+
+      return updatedCount;
+    } catch (e) {
+      throw ServerException(message: 'خطأ في التحديث الآمن للفروع: $e');
     }
   }
 
@@ -821,25 +1076,58 @@ class SupabaseVoterDatasource {
   Future<List<VoterModel>> getAllVoters() async {
     final allVoters = <Map<String, dynamic>>[];
     const pageSize = 1000;
-    int offset = 0;
 
     await _ensurePermissionsLoaded();
     var baseQuery = _client.from('voters').select(_selectWithJoins);
     baseQuery = _applyAgentPermissionsFilter(baseQuery);
     debugPrint('[SupabaseVoterDatasource] getAllVoters start');
 
-    while (true) {
-      final response = await baseQuery
-          .order('voter_symbol', ascending: true)
-          .range(offset, offset + pageSize - 1);
+    Future<List<Map<String, dynamic>>> loadAll(bool includeHouseholdSort) async {
+      final rows = <Map<String, dynamic>>[];
+      int localOffset = 0;
 
-      if (response.isEmpty) break;
-      allVoters.addAll((response as List).cast<Map<String, dynamic>>());
-      if (response.length < pageSize) break;
-      offset += pageSize;
-      // Small delay between chunks to avoid overwhelming connection pool
-      // when many agents sync simultaneously
-      await Future.delayed(const Duration(milliseconds: 100));
+      while (true) {
+        var ordered = baseQuery.order('family_id', ascending: true);
+        if (includeHouseholdSort) {
+          ordered = ordered
+              .order('household_group', ascending: true)
+              .order('household_role_rank', ascending: true);
+        }
+
+        final response = await ordered
+            .order('voter_symbol', ascending: true)
+            .range(localOffset, localOffset + pageSize - 1);
+
+        if (response.isEmpty) {
+          break;
+        }
+        rows.addAll((response as List).cast<Map<String, dynamic>>());
+        if (response.length < pageSize) {
+          break;
+        }
+        localOffset += pageSize;
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+
+      return rows;
+    }
+
+    if (_householdColumnsAvailable == false) {
+      allVoters.addAll(await loadAll(false));
+    } else {
+      try {
+        allVoters.addAll(await loadAll(true));
+        _householdColumnsAvailable ??= true;
+      } catch (e) {
+        if (_isMissingHouseholdColumnError(e)) {
+          _markHouseholdColumnsUnavailable('getAllVoters');
+          allVoters
+            ..clear()
+            ..addAll(await loadAll(false));
+        } else {
+          rethrow;
+        }
+      }
     }
 
     debugPrint(
@@ -858,7 +1146,32 @@ class SupabaseVoterDatasource {
         .gt('updated_at', since.toIso8601String());
     query = _applyAgentPermissionsFilter(query);
 
-    final response = await query.order('voter_symbol', ascending: true);
+    Future<dynamic> load(bool includeHouseholdSort) {
+      var ordered = query.order('family_id', ascending: true);
+      if (includeHouseholdSort) {
+        ordered = ordered
+            .order('household_group', ascending: true)
+            .order('household_role_rank', ascending: true);
+      }
+      return ordered.order('voter_symbol', ascending: true);
+    }
+
+    dynamic response;
+    if (_householdColumnsAvailable == false) {
+      response = await load(false);
+    } else {
+      try {
+        response = await load(true);
+        _householdColumnsAvailable ??= true;
+      } catch (e) {
+        if (_isMissingHouseholdColumnError(e)) {
+          _markHouseholdColumnsUnavailable('getVotersUpdatedAfter');
+          response = await load(false);
+        } else {
+          rethrow;
+        }
+      }
+    }
 
     return (response as List)
         .map((json) => VoterModel.fromJson(json as Map<String, dynamic>))

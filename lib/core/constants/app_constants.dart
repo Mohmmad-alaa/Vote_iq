@@ -41,6 +41,7 @@ class AppConstants {
   static const String statusNotVoted = 'لم يصوت';
   static const String statusVoted = 'تم التصويت';
   static const String statusRefused = 'رفض';
+  static const String statusNotFound = 'غير موجود';
 
   // ── Agent Roles ──
   static const String roleAdmin = 'admin';

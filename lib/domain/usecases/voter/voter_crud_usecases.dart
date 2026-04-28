@@ -38,3 +38,21 @@ class ImportVotersUseCase {
     return repository.importVoters(filePath);
   }
 }
+
+class ImportVoterHouseholdDataUseCase {
+  final VoterRepository repository;
+  ImportVoterHouseholdDataUseCase(this.repository);
+
+  Future<Either<Failure, int>> call(String filePath) {
+    return repository.importVoterHouseholdData(filePath);
+  }
+}
+
+class ImportVoterSubClansUseCase {
+  final VoterRepository repository;
+  ImportVoterSubClansUseCase(this.repository);
+
+  Future<Either<Failure, int>> call(String filePath) {
+    return repository.importVoterSubClans(filePath);
+  }
+}

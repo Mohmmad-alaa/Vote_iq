@@ -5,6 +5,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
 import '../../domain/entities/voter.dart';
+import 'voter_household_sort.dart';
 
 class PdfPrintService {
   /// Fonts cache to avoid refetching during the same session.
@@ -30,9 +31,8 @@ class PdfPrintService {
     await _loadFonts();
     final doc = pw.Document();
 
-    // Sort voters by first name
     final sortedVoters = List<Voter>.from(voters)
-      ..sort((a, b) => (a.firstName ?? '').compareTo(b.firstName ?? ''));
+      ..sort(compareVotersByHousehold);
 
     doc.addPage(
       pw.MultiPage(

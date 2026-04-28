@@ -1,4 +1,5 @@
 import '../../domain/entities/voter.dart';
+import '../../core/utils/voter_household_sort.dart';
 
 /// Voter data model — handles JSON serialization for Supabase.
 class VoterModel {
@@ -15,6 +16,8 @@ class VoterModel {
   final String? refusalReason;
   final DateTime? updatedAt;
   final String? updatedBy;
+  final String? householdGroup;
+  final String? householdRole;
 
   // From joins
   final String? familyName;
@@ -37,6 +40,8 @@ class VoterModel {
     this.refusalReason,
     this.updatedAt,
     this.updatedBy,
+    this.householdGroup,
+    this.householdRole,
     this.familyName,
     this.subClanName,
     this.centerName,
@@ -70,6 +75,12 @@ class VoterModel {
           ? DateTime.parse(json['updated_at'] as String)
           : null,
       updatedBy: json['updated_by'] as String?,
+      householdGroup: normalizeHouseholdGroup(
+        json['household_group'] as String?,
+      ),
+      householdRole: normalizeHouseholdRole(
+        json['household_role'] as String?,
+      ),
       // Nested join data
       familyName: familyJoin?['family_name'] as String?,
       subClanName: subClanJoin?['sub_name'] as String?,
@@ -96,6 +107,8 @@ class VoterModel {
     if (candidateId != null) map['candidate_id'] = candidateId;
     if (refusalReason != null) map['refusal_reason'] = refusalReason;
     if (updatedBy != null) map['updated_by'] = updatedBy;
+    if (householdGroup != null) map['household_group'] = householdGroup;
+    if (householdRole != null) map['household_role'] = householdRole;
     return map;
   }
 
@@ -115,6 +128,8 @@ class VoterModel {
       refusalReason: refusalReason,
       updatedAt: updatedAt,
       updatedBy: updatedBy,
+      householdGroup: householdGroup,
+      householdRole: householdRole,
       familyName: familyName,
       subClanName: subClanName,
       centerName: centerName,
@@ -139,6 +154,8 @@ class VoterModel {
       refusalReason: entity.refusalReason,
       updatedAt: entity.updatedAt,
       updatedBy: entity.updatedBy,
+      householdGroup: entity.householdGroup,
+      householdRole: entity.householdRole,
       familyName: entity.familyName,
       subClanName: entity.subClanName,
       centerName: entity.centerName,
@@ -170,6 +187,8 @@ class VoterModel {
       'refusal_reason': refusalReason,
       'updated_at': updatedAt?.toIso8601String(),
       'updated_by': updatedBy,
+      'household_group': householdGroup,
+      'household_role': householdRole,
       'family_name': familyName,
       'sub_clan_name': subClanName,
       'center_name': centerName,
@@ -197,6 +216,12 @@ class VoterModel {
           ? DateTime.parse(map['updated_at'] as String)
           : null,
       updatedBy: map['updated_by'] as String?,
+      householdGroup: normalizeHouseholdGroup(
+        map['household_group'] as String?,
+      ),
+      householdRole: normalizeHouseholdRole(
+        map['household_role'] as String?,
+      ),
       familyName: map['family_name'] as String?,
       subClanName: map['sub_clan_name'] as String?,
       centerName: map['center_name'] as String?,

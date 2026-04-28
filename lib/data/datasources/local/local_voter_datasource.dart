@@ -3,6 +3,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 
 import '../../../core/constants/app_constants.dart';
 import '../../../core/errors/exceptions.dart';
+import '../../../core/utils/voter_household_sort.dart';
 import '../../models/voter_model.dart';
 
 /// Local datasource for voter data using Hive (offline cache).
@@ -144,7 +145,7 @@ class LocalVoterDatasource {
   }) async {
     try {
       final cache = await _ensureMemoryCache();
-      int total = 0, voted = 0, refused = 0, notVoted = 0;
+      int total = 0, voted = 0, refused = 0, notVoted = 0, notFound = 0;
 
       for (final voter in cache.values) {
         if (familyId != null && voter['family_id'] != familyId) continue;
@@ -159,6 +160,9 @@ class LocalVoterDatasource {
           case AppConstants.statusRefused:
             refused++;
             break;
+          case AppConstants.statusNotFound:
+            notFound++;
+            break;
           default:
             notVoted++;
             break;
@@ -170,6 +174,7 @@ class LocalVoterDatasource {
         'voted': voted,
         'refused': refused,
         'notVoted': notVoted,
+        'notFound': notFound,
       };
     } catch (e) {
       throw CacheException(message: 'خطأ في حساب الإحصائيات المحلية: $e');
@@ -197,6 +202,7 @@ class LocalVoterDatasource {
             'voted': 0,
             'refused': 0,
             'notVoted': 0,
+            'notFound': 0,
           },
         );
 
@@ -208,6 +214,9 @@ class LocalVoterDatasource {
             break;
           case AppConstants.statusRefused:
             bucket['refused'] = (bucket['refused'] ?? 0) + 1;
+            break;
+          case AppConstants.statusNotFound:
+            bucket['notFound'] = (bucket['notFound'] ?? 0) + 1;
             break;
           default:
             bucket['notVoted'] = (bucket['notVoted'] ?? 0) + 1;
@@ -301,12 +310,7 @@ class _ProcessParams {
 
 List<VoterModel> _processVotersInIsolate(_ProcessParams params) {
   final rows = _filterRows(params);
-
-  rows.sort(
-    (a, b) => (a['voter_symbol'] as String).compareTo(
-      b['voter_symbol'] as String,
-    ),
-  );
+  rows.sort(compareVoterMapsByHousehold);
 
   if (params.pageSize <= 0) {
     return rows.map(VoterModel.fromHiveMap).toList(growable: false);

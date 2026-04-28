@@ -20,9 +20,11 @@ class AppColors {
   static const Color statusVoted    = Color(0xFF2E7D32); // أخضر داكن
   static const Color statusNotVoted = Color(0xFF455A64); // رمادي مزرق
   static const Color statusRefused  = Color(0xFFC62828); // أحمر داكن
+  static const Color statusNotFound = Color(0xFFF57C00); // برتقالي داكن
   static const Color statusVotedBg    = Color(0xFFE8F5E9);
   static const Color statusNotVotedBg = Color(0xFFECEFF1);
   static const Color statusRefusedBg  = Color(0xFFFFEBEE);
+  static const Color statusNotFoundBg = Color(0xFFFFF3E0);
 
   // ── Backgrounds ──
   static const Color scaffoldBg = Color(0xFFF0F4FA); // رمادي مزرق فاتح جداً

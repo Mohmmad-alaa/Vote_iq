@@ -5,6 +5,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../core/constants/app_colors.dart';
 import '../../../core/constants/app_constants.dart';
+import '../../../core/utils/voter_household_sort.dart';
 import '../../../domain/entities/voter.dart';
 import '../../common_widgets/excel_filter_header.dart';
 import '../../lookup/cubit/lookup_cubit.dart';
@@ -160,6 +161,8 @@ class _VotersDataTableState extends State<VotersDataTable> {
         return AppColors.statusVoted;
       case AppConstants.statusRefused:
         return AppColors.statusRefused;
+      case AppConstants.statusNotFound:
+        return AppColors.statusNotFound;
       default:
         return AppColors.statusNotVoted;
     }
@@ -185,7 +188,11 @@ class _VotersDataTableState extends State<VotersDataTable> {
       final key = _sortKey!;
       list.sort((a, b) {
         final cmp = _cellText(a, key).compareTo(_cellText(b, key));
-        return _sortAsc ? cmp : -cmp;
+        if (cmp != 0) {
+          return _sortAsc ? cmp : -cmp;
+        }
+        final householdCmp = compareVotersByHousehold(a, b);
+        return _sortAsc ? householdCmp : -householdCmp;
       });
     }
 

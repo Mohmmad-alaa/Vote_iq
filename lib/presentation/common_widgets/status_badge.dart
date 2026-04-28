@@ -27,6 +27,12 @@ class StatusBadge extends StatelessWidget {
         borderColor = AppColors.statusRefused.withValues(alpha: 0.3);
         icon = Icons.cancel_outlined;
         break;
+      case AppConstants.statusNotFound:
+        backgroundColor = AppColors.statusNotFoundBg;
+        textColor = AppColors.statusNotFound;
+        borderColor = AppColors.statusNotFound.withValues(alpha: 0.3);
+        icon = Icons.person_off_outlined;
+        break;
       case AppConstants.statusNotVoted:
       default:
         backgroundColor = AppColors.statusNotVotedBg;

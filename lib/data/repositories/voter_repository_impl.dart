@@ -10,6 +10,7 @@ import '../../../core/constants/app_constants.dart';
 import '../../../core/errors/exceptions.dart';
 import '../../../core/errors/failures.dart';
 import '../../../core/utils/connectivity_helper.dart';
+import '../../../core/utils/voter_household_sort.dart';
 import '../../../domain/entities/voter.dart';
 import '../../../domain/repositories/voter_repository.dart';
 import '../datasources/local/local_voter_datasource.dart';
@@ -778,6 +779,7 @@ class VoterRepositoryImpl implements VoterRepository {
           voted: voted,
           refused: cached['refused'] ?? 0,
           notVoted: cached['notVoted'] ?? 0,
+          notFound: cached['notFound'] ?? 0,
           votedPercentage: total > 0 ? (voted / total) * 100 : 0,
         ),
       );
@@ -829,6 +831,7 @@ class VoterRepositoryImpl implements VoterRepository {
         voted: voted,
         refused: entry.value['refused'] ?? 0,
         notVoted: entry.value['notVoted'] ?? 0,
+        notFound: entry.value['notFound'] ?? 0,
         votedPercentage: total > 0 ? (voted / total) * 100 : 0,
       );
     }
@@ -855,6 +858,8 @@ class VoterRepositoryImpl implements VoterRepository {
       refusalReason: incoming.refusalReason,
       updatedAt: incoming.updatedAt ?? cached.updatedAt,
       updatedBy: incoming.updatedBy ?? cached.updatedBy,
+      householdGroup: incoming.householdGroup ?? cached.householdGroup,
+      householdRole: incoming.householdRole ?? cached.householdRole,
       familyName: incoming.familyName ?? cached.familyName,
       subClanName: incoming.subClanName ?? cached.subClanName,
       centerName: incoming.centerName ?? cached.centerName,
@@ -1046,6 +1051,8 @@ class VoterRepositoryImpl implements VoterRepository {
             familyId: fId,
             subClanId: sId,
             centerId: cId,
+            householdGroup: v.householdGroup,
+            householdRole: v.householdRole,
             status: 'لم يصوت',
           ),
         );
@@ -1076,6 +1083,200 @@ class VoterRepositoryImpl implements VoterRepository {
           message: 'خطأ غير متوقع أثناء الاستيراد: $e',
         ),
       );
+    }
+  }
+
+  @override
+  Future<Either<Failure, int>> importVoterHouseholdData(String filePath) async {
+    try {
+      if (!await _connectivity.hasInternet) {
+        return const Left(
+          ServerFailure(
+            message: 'يتطلب هذا التحديث اتصالًا بالإنترنت لأنه يعدل السجلات الموجودة فقط.',
+          ),
+        );
+      }
+
+      final parsedVoters = await _importService.parseVotersExcel(filePath);
+      if (parsedVoters.isEmpty) {
+        return const Left(
+          ServerFailure(message: 'لم يتم العثور على بيانات صالحة في الملف'),
+        );
+      }
+
+      final hasExplicitHouseholdData = parsedVoters.any((voter) {
+        final role = normalizeHouseholdRole(voter.householdRole);
+        final group = normalizeHouseholdGroup(voter.householdGroup);
+        return role == householdRoleWife ||
+            role == householdRoleChild ||
+            role == householdRoleOther ||
+            (group != null && group != voter.voterSymbol);
+      });
+
+      if (!hasExplicitHouseholdData) {
+        return const Left(
+          ServerFailure(
+            message:
+                'الملف لا يحتوي على بيانات واضحة لرقم ولي الأمر أو صلة القرابة، لذلك تم إيقاف التحديث الآمن.',
+          ),
+        );
+      }
+
+      final uniqueBySymbol = <String, VoterModel>{};
+      for (final voter in parsedVoters) {
+        uniqueBySymbol[voter.voterSymbol] = VoterModel(
+          voterSymbol: voter.voterSymbol,
+          householdGroup: voter.householdGroup,
+          householdRole: voter.householdRole,
+          status: voter.status,
+        );
+      }
+
+      final requestedSymbols = uniqueBySymbol.keys.toList(growable: false);
+      final existingSymbols = await _remoteDatasource.getExistingVoterSymbols(
+        requestedSymbols,
+      );
+
+      if (existingSymbols.isEmpty) {
+        return const Left(
+          ServerFailure(
+            message:
+                'لم تتم مطابقة أي رقم ناخب من الملف مع قاعدة البيانات، لذلك لم يتم تعديل أي سجل.',
+          ),
+        );
+      }
+
+      final votersToUpdate = requestedSymbols
+          .where(existingSymbols.contains)
+          .map((symbol) => uniqueBySymbol[symbol]!)
+          .toList(growable: false);
+
+      final updatedCount = await _remoteDatasource.bulkUpdateVoterHouseholds(
+        votersToUpdate,
+      );
+
+      return Right(updatedCount);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(message: e.message));
+    } catch (e, stack) {
+      debugPrint(
+        '[VoterRepository] safe household import unexpected error: $e',
+      );
+      debugPrint('$stack');
+      return Left(
+        ServerFailure(
+          message: 'خطأ غير متوقع أثناء التحديث الآمن لبيانات الأسرة: $e',
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Either<Failure, int>> importVoterSubClans(String filePath) async {
+    try {
+      if (!await _connectivity.hasInternet) {
+        return const Left(
+          ServerFailure(
+            message: 'تتطلب هذه العملية اتصالاً بالانترنت لتحديث الفروع',
+          ),
+        );
+      }
+
+      final parsedVoters = await _importService.parseVotersExcel(filePath);
+      if (parsedVoters.isEmpty) {
+        return const Left(
+          ServerFailure(message: 'لم يتم العثور على بيانات صالحة في الملف'),
+        );
+      }
+
+      // 1. Fetch current lookups to map names to IDs
+      final families = await _lookupRemote.getFamilies();
+      final familyMap = {for (var f in families) f.familyName.trim(): f.id};
+
+      final allSubClans = await _lookupRemote.getSubClans();
+      final subClanMap = <String, int>{}; // "familyId_name" -> sub_clan_id
+      for (var s in allSubClans) {
+        subClanMap['${s.familyId}_${s.subName.trim()}'] = s.id;
+      }
+
+      // 2. Dynamically create missing families and sub-clans if they are mentioned in Excel
+      // Create missing families
+      final uniqueFamilies = parsedVoters
+          .map((v) => v.familyName?.trim())
+          .where((f) => f != null && f.isNotEmpty)
+          .cast<String>()
+          .toSet();
+      for (final family in uniqueFamilies) {
+        if (!familyMap.containsKey(family)) {
+          final newFamily = await _lookupRemote.addFamily(family);
+          familyMap[family] = newFamily.id;
+        }
+      }
+
+      // Create missing sub-clans
+      final uniqueSubClansKeys = <String>{};
+      for (final v in parsedVoters) {
+        final fName = v.familyName?.trim();
+        final sName = v.subClanName?.trim();
+        if (fName != null && fName.isNotEmpty && sName != null && sName.isNotEmpty) {
+          uniqueSubClansKeys.add('$fName|$sName');
+        }
+      }
+      for (final key in uniqueSubClansKeys) {
+        final parts = key.split('|');
+        final fName = parts[0];
+        final sName = parts[1];
+        final fId = familyMap[fName];
+        if (fId != null) {
+          final mapKey = '${fId}_$sName';
+          if (!subClanMap.containsKey(mapKey)) {
+            final newSub = await _lookupRemote.addSubClan(fId, sName);
+            subClanMap[mapKey] = newSub.id;
+          }
+        }
+      }
+
+      // 3. Map to model for update
+      final votersToUpdateRaw = <VoterModel>[];
+      for (var v in parsedVoters) {
+        int? fId = v.familyName != null ? familyMap[v.familyName!.trim()] : null;
+        int? sId;
+        if (fId != null && v.subClanName != null) {
+          sId = subClanMap['${fId}_${v.subClanName!.trim()}'];
+        }
+
+        if (fId != null || sId != null) {
+          votersToUpdateRaw.add(
+            VoterModel(
+              voterSymbol: v.voterSymbol,
+              familyId: fId,
+              subClanId: sId,
+              status: v.status,
+            ),
+          );
+        }
+      }
+
+      // 4. Ensure we only update EXISTING voters (Safety check)
+      final requestedSymbols = votersToUpdateRaw.map((v) => v.voterSymbol).toList();
+      final existingSymbols = await _remoteDatasource.getExistingVoterSymbols(requestedSymbols);
+
+      final votersToUpdateFinal = votersToUpdateRaw
+          .where((v) => existingSymbols.contains(v.voterSymbol))
+          .toList();
+
+      if (votersToUpdateFinal.isEmpty) {
+        return const Left(
+          ServerFailure(message: 'لم يتم العثور على أي رقم ناخب مطابق في قاعدة البيانات للتحديث'),
+        );
+      }
+
+      final count = await _remoteDatasource.bulkUpdateVoterSubClans(votersToUpdateFinal);
+      return Right(count);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(message: e.message));
+    } catch (e) {
+      return Left(ServerFailure(message: 'خطأ في التحديث الآمن للفروع: $e'));
     }
   }
 
