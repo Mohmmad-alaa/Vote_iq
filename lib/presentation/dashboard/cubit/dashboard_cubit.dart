@@ -405,7 +405,7 @@ class DashboardCubit extends Cubit<DashboardState> {
     if (state is! DashboardLoaded) return;
 
     _refreshDebounce?.cancel();
-    _refreshDebounce = Timer(const Duration(milliseconds: 2000), () {
+    _refreshDebounce = Timer(const Duration(milliseconds: 10000), () {
       debugPrint('[DashboardCubit] refreshing stats after realtime update');
       refreshStats();
     });

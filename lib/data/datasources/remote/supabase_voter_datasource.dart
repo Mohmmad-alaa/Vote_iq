@@ -433,8 +433,9 @@ class SupabaseVoterDatasource {
           includeManageableUnassigned: filter.includeManageableUnassigned,
         );
         query = _applyFilterConstraints(query, filter);
-        final rows = await _fetchPagedRows(query);
-        return rows.length;
+        // Execute count on the server side instead of fetching all rows
+        final response = await query.count(CountOption.exact);
+        return response.count ?? 0;
       }
 
       await _ensurePermissionsLoaded();
@@ -532,19 +533,8 @@ class SupabaseVoterDatasource {
       final escapedQuery = _escapeOrValue(cleanQuery);
       final resultsBySymbol = <String, Map<String, dynamic>>{};
 
-      await _ensurePermissionsLoaded();
-      var byNameOrSymbolQuery = _client.from('voters').select(_selectWithJoins);
-      byNameOrSymbolQuery = _applyAgentPermissionsFilter(byNameOrSymbolQuery);
-      byNameOrSymbolQuery = byNameOrSymbolQuery.or(
-        'voter_symbol.ilike.%$escapedQuery%,first_name.ilike.%$escapedQuery%,father_name.ilike.%$escapedQuery%,grandfather_name.ilike.%$escapedQuery%',
-      );
-      final byNameOrSymbol = await byNameOrSymbolQuery
-          .order('voter_symbol', ascending: true)
-          .limit(1000);
-      for (final row in byNameOrSymbol as List) {
-        final data = row as Map<String, dynamic>;
-        resultsBySymbol[data['voter_symbol'] as String] = data;
-      }
+      final orConditions = <String>[];
+      orConditions.add('voter_symbol.ilike.%$escapedQuery%,first_name.ilike.%$escapedQuery%,father_name.ilike.%$escapedQuery%,grandfather_name.ilike.%$escapedQuery%');
 
       final familyData = await _client
           .from('families')
@@ -555,16 +545,7 @@ class SupabaseVoterDatasource {
           .toList();
 
       if (familyIds.isNotEmpty) {
-        var byFamilyQuery = _client.from('voters').select(_selectWithJoins);
-        byFamilyQuery = _applyAgentPermissionsFilter(byFamilyQuery);
-        byFamilyQuery = byFamilyQuery.inFilter('family_id', familyIds);
-        final byFamily = await byFamilyQuery
-            .order('voter_symbol', ascending: true)
-            .limit(1000);
-        for (final row in byFamily as List) {
-          final data = row as Map<String, dynamic>;
-          resultsBySymbol[data['voter_symbol'] as String] = data;
-        }
+        orConditions.add('family_id.in.(${familyIds.join(',')})');
       }
 
       final subClanData = await _client
@@ -576,16 +557,21 @@ class SupabaseVoterDatasource {
           .toList();
 
       if (subClanIds.isNotEmpty) {
-        var bySubClanQuery = _client.from('voters').select(_selectWithJoins);
-        bySubClanQuery = _applyAgentPermissionsFilter(bySubClanQuery);
-        bySubClanQuery = bySubClanQuery.inFilter('sub_clan_id', subClanIds);
-        final bySubClan = await bySubClanQuery
-            .order('voter_symbol', ascending: true)
-            .limit(1000);
-        for (final row in bySubClan as List) {
-          final data = row as Map<String, dynamic>;
-          resultsBySymbol[data['voter_symbol'] as String] = data;
-        }
+        orConditions.add('sub_clan_id.in.(${subClanIds.join(',')})');
+      }
+
+      await _ensurePermissionsLoaded();
+      var mainQuery = _client.from('voters').select(_selectWithJoins);
+      mainQuery = _applyAgentPermissionsFilter(mainQuery);
+      mainQuery = mainQuery.or(orConditions.join(','));
+
+      final searchResults = await mainQuery
+          .order('voter_symbol', ascending: true)
+          .limit(1000);
+
+      for (final row in searchResults as List) {
+        final data = row as Map<String, dynamic>;
+        resultsBySymbol[data['voter_symbol'] as String] = data;
       }
 
       final sorted = resultsBySymbol.values.toList()
@@ -708,7 +694,6 @@ class SupabaseVoterDatasource {
     }
   }
 
-  /// Get voting statistics.
   Future<VoterStats> getVoterStats({
     int? familyId,
     int? subClanId,
@@ -717,25 +702,27 @@ class SupabaseVoterDatasource {
     try {
       await _ensurePermissionsLoaded();
       final stopwatch = Stopwatch()..start();
-      var query = _client.from('voters').select('voter_symbol, status');
-      query = _applyAgentPermissionsFilter(query);
 
-      if (familyId != null) query = query.eq('family_id', familyId);
-      if (subClanId != null) query = query.eq('sub_clan_id', subClanId);
-      if (centerId != null) query = query.eq('center_id', centerId);
+      dynamic buildBaseQuery() {
+        var query = _client.from('voters').select('voter_symbol');
+        query = _applyAgentPermissionsFilter(query);
+        if (familyId != null) query = query.eq('family_id', familyId);
+        if (subClanId != null) query = query.eq('sub_clan_id', subClanId);
+        if (centerId != null) query = query.eq('center_id', centerId);
+        return query;
+      }
 
-      final list = await _fetchPagedRows(query);
+      final totalFuture = buildBaseQuery().count(CountOption.exact);
+      final votedFuture = buildBaseQuery().eq('status', AppConstants.statusVoted).count(CountOption.exact);
+      final refusedFuture = buildBaseQuery().eq('status', AppConstants.statusRefused).count(CountOption.exact);
+      final notFoundFuture = buildBaseQuery().eq('status', AppConstants.statusNotFound).count(CountOption.exact);
 
-      final total = list.length;
-      final voted = list
-          .where((r) => r['status'] == AppConstants.statusVoted)
-          .length;
-      final refused = list
-          .where((r) => r['status'] == AppConstants.statusRefused)
-          .length;
-      final notFound = list
-          .where((r) => r['status'] == AppConstants.statusNotFound)
-          .length;
+      final results = await Future.wait([totalFuture, votedFuture, refusedFuture, notFoundFuture]);
+
+      final total = results[0].count ?? 0;
+      final voted = results[1].count ?? 0;
+      final refused = results[2].count ?? 0;
+      final notFound = results[3].count ?? 0;
       final notVoted = total - voted - refused - notFound;
 
       final stats = VoterStats(
@@ -945,7 +932,7 @@ class SupabaseVoterDatasource {
       }
 
       var updatedCount = 0;
-      const chunkSize = 50;
+      const chunkSize = 10;
 
       for (var i = 0; i < voters.length; i += chunkSize) {
         final end = (i + chunkSize < voters.length) ? i + chunkSize : voters.length;

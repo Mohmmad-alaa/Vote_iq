@@ -38,7 +38,7 @@ class VoterRepositoryImpl implements VoterRepository {
   bool _isFirstLoad = true;
   String? _loadedForUserId;
   static const Duration _syncInterval = Duration(minutes: 5);
-  Future<void>? _cachePrimingFuture;
+  Future<List<VoterModel>>? _cachePrimingFuture;
   Timer? _backgroundSyncTimer;
   bool _isBackgroundSyncRunning = false;
   late final Stream<Voter> _sharedVoterChanges = _remoteDatasource.voterChanges
@@ -267,22 +267,35 @@ class VoterRepositoryImpl implements VoterRepository {
   }
 
   Future<List<VoterModel>> _loadAllDataFromServer() async {
-    final stopwatch = Stopwatch()..start();
-    final allVoters = await _remoteDatasource.getAllVoters();
-    debugPrint(
-      'Repository: _loadAllDataFromServer fetched ${allVoters.length} voters',
-    );
-    await _localDatasource.clearCache();
-    await _localDatasource.cacheVoters(allVoters);
-    await _setLastSyncTime(DateTime.now());
-    _isDataLoaded = true;
-    _isFirstLoad = false;
-    _logDuration(
-      'loadAllDataFromServer',
-      stopwatch,
-      extra: 'count=${allVoters.length}',
-    );
-    return allVoters;
+    if (_cachePrimingFuture != null) {
+      debugPrint('Repository: _loadAllDataFromServer already in progress, returning shared future');
+      return _cachePrimingFuture!;
+    }
+
+    _cachePrimingFuture = () async {
+      try {
+        final stopwatch = Stopwatch()..start();
+        final allVoters = await _remoteDatasource.getAllVoters();
+        debugPrint(
+          'Repository: _loadAllDataFromServer fetched ${allVoters.length} voters',
+        );
+        await _localDatasource.clearCache();
+        await _localDatasource.cacheVoters(allVoters);
+        await _setLastSyncTime(DateTime.now());
+        _isDataLoaded = true;
+        _isFirstLoad = false;
+        _logDuration(
+          'loadAllDataFromServer',
+          stopwatch,
+          extra: 'count=${allVoters.length}',
+        );
+        return allVoters;
+      } finally {
+        _cachePrimingFuture = null;
+      }
+    }();
+
+    return _cachePrimingFuture!;
   }
 
   Future<void> _ensureStatsCacheReady() async {
@@ -311,16 +324,7 @@ class VoterRepositoryImpl implements VoterRepository {
       return;
     }
 
-    _cachePrimingFuture = () async {
-      debugPrint('Repository: priming stats cache from server');
-      await _loadAllDataFromServer();
-    }();
-
-    try {
-      await _cachePrimingFuture;
-    } finally {
-      _cachePrimingFuture = null;
-    }
+    await _loadAllDataFromServer();
   }
 
   @override
